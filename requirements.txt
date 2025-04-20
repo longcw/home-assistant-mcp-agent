@@ -1,0 +1,2 @@
+mcp
+livekit-agents[openai]>=1.0.0
