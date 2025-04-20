@@ -1,6 +1,6 @@
 # LiveKit Agent integrated with Home Assistant MCP Server
 
-This project integrates [LiveKit Agents](https://github.com/livekit/agents) with Home Assistant's [Model Context Protocol (MCP) Server](https://www.home-assistant.io/integrations/mcp_server/), allowing voice control of your smart home through LiveKit's real-time communication platform.
+This project integrates [LiveKit Agents](https://github.com/livekit/agents) with Home Assistant's [Model Context Protocol (MCP) Server](https://www.home-assistant.io/integrations/mcp_server/), allowing voice control of your smart home through LiveKit agents.
 
 ## Overview
 
