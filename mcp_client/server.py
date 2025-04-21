@@ -1,21 +1,18 @@
 # modified from https://github.com/livekit-examples/basic-mcp/blob/main/mcp_client/server.py
 
 import asyncio
-import inspect
-import json
 import logging
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from typing import Any, Optional
 
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
+from livekit.agents import FunctionTool
 from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
 from mcp.types import CallToolResult, JSONRPCMessage, Tool as MCPTool
 from typing_extensions import NotRequired, TypedDict
 
-from livekit.agents import FunctionTool, function_tool
-
-from .schema_to_params import create_pydantic_model_from_schema
+from .mcp_utils import mcp_to_function_tool
 
 logger = logging.getLogger()
 
@@ -53,62 +50,7 @@ class MCPServer:
     async def get_agent_tools(self) -> list[FunctionTool]:
         """Get the tools available on the server as FunctionTools."""
         tools = await self.list_tools()
-        return [self._mcp_to_function_tool(tool) for tool in tools]
-
-    def _mcp_to_function_tool(self, tool: MCPTool) -> FunctionTool:
-        """
-        Converts an MCP tool to a FunctionTool.
-        """
-        schema = tool.inputSchema
-        name = tool.name
-        description = tool.description
-        ArgsModel = create_pydantic_model_from_schema(schema, tool.name)
-
-        async def tool_impl(tool_input) -> str:
-            """
-            Args:
-                tool_input: The input model of the tool
-            """
-            try:
-                assert isinstance(tool_input, ArgsModel)
-                arguments = tool_input.model_dump()
-            except Exception as e:
-                return f"Error parsing input arguments for tool '{name}': {e}"
-
-            try:
-                arguments = {k: str(v) for k, v in arguments.items() if v is not None}
-                arguments.pop("device_class", None)
-                result = await self.call_tool(name, arguments)
-
-                logger.info(f"Called tool '{name}' with arguments: {arguments}")
-                # return "called tool"
-                # only text content is supported for now
-                text_contents = [
-                    content.text for content in result.content if content.type == "text"
-                ]
-                text = json.dumps(text_contents)
-
-                if result.isError:
-                    raise ValueError("Tool call failed with content: " + text)
-
-                return text
-
-            except Exception as e:
-                logger.error(f"Error calling tool '{name}': {e}")
-                return f"Error calling tool '{name}': {e}"
-
-        tool_impl.__signature__ = inspect.Signature(
-            parameters=[
-                inspect.Parameter(
-                    name="tool_input",
-                    kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                    annotation=ArgsModel,
-                )
-            ]
-        )
-        tool_impl.__annotations__ = {"return": str, "tool_input": ArgsModel}
-
-        return function_tool(tool_impl, name=name, description=description)
+        return [mcp_to_function_tool(tool, self.call_tool) for tool in tools]
 
 
 # Base class for MCP servers that use a ClientSession
@@ -166,7 +108,9 @@ class _MCPServerWithClientSession(MCPServer):
         try:
             transport = await self.exit_stack.enter_async_context(self.create_streams())
             read, write = transport
-            session = await self.exit_stack.enter_async_context(ClientSession(read, write))
+            session = await self.exit_stack.enter_async_context(
+                ClientSession(read, write)
+            )
             await session.initialize()
             self.session = session
             self.logger.info(f"Connected to MCP server: {self.name}")
@@ -178,7 +122,9 @@ class _MCPServerWithClientSession(MCPServer):
     async def list_tools(self) -> list[MCPTool]:
         """List the tools available on the server."""
         if not self.session:
-            raise RuntimeError("Server not initialized. Make sure you call connect() first.")
+            raise RuntimeError(
+                "Server not initialized. Make sure you call connect() first."
+            )
 
         # Return from cache if caching is enabled, we have tools, and the cache is not dirty
         if self.cache_tools_list and not self._cache_dirty and self._tools_list:
@@ -201,7 +147,9 @@ class _MCPServerWithClientSession(MCPServer):
     ) -> CallToolResult:
         """Invoke a tool on the server."""
         if not self.session:
-            raise RuntimeError("Server not initialized. Make sure you call connect() first.")
+            raise RuntimeError(
+                "Server not initialized. Make sure you call connect() first."
+            )
 
         arguments = arguments or {}
         try:

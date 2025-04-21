@@ -1,11 +1,79 @@
-# modified from https://github.com/Finndersen/pydanticai_mcp_demo/blob/main/client/mcp_agent/util/schema_to_params.py
+import inspect
+import json
+import logging
+from collections.abc import Coroutine
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
+from livekit.agents import FunctionTool, function_tool
+from mcp.types import CallToolResult, Tool as MCPTool
 from pydantic import BaseModel, Field, create_model
 
+logger = logging.getLogger(__name__)
 
-def create_pydantic_model_from_schema(schema: dict[str, Any], model_name: str) -> type[BaseModel]:
+
+def mcp_to_function_tool(
+    tool: MCPTool,
+    call_tool: Callable[[str, dict[str, Any]], Coroutine[Any, Any, CallToolResult]],
+) -> FunctionTool:
+    """
+    Converts an MCP tool to a FunctionTool.
+    """
+    schema = tool.inputSchema
+    name = tool.name
+    description = tool.description
+    ArgsModel = create_pydantic_model_from_schema(schema, tool.name)
+
+    async def tool_impl(tool_input) -> str:
+        """
+        Args:
+            tool_input: The input model of the tool
+        """
+        try:
+            assert isinstance(tool_input, ArgsModel)
+            arguments = tool_input.model_dump()
+        except Exception as e:
+            return f"Error parsing input arguments for tool '{name}': {e}"
+
+        try:
+            arguments = {k: str(v) for k, v in arguments.items() if v is not None}
+            result = await call_tool(name, arguments)
+
+            logger.info(f"Called tool '{name}' with arguments: {arguments}")
+
+            # only text content is supported for now
+            text_contents = [
+                content.text for content in result.content if content.type == "text"
+            ]
+            text = json.dumps(text_contents)
+
+            if result.isError:
+                raise ValueError("Tool call failed with content: " + text)
+
+            return text
+
+        except Exception as e:
+            logger.error(f"Error calling tool '{name}': {e}")
+            return f"Error calling tool '{name}': {e}"
+
+    tool_impl.__signature__ = inspect.Signature(
+        parameters=[
+            inspect.Parameter(
+                name="tool_input",
+                kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                annotation=ArgsModel,
+            )
+        ]
+    )
+    tool_impl.__annotations__ = {"return": str, "tool_input": ArgsModel}
+
+    return function_tool(tool_impl, name=name, description=description)
+
+
+# modified from https://github.com/Finndersen/pydanticai_mcp_demo/blob/main/client/mcp_agent/util/schema_to_params.py
+def create_pydantic_model_from_schema(
+    schema: dict[str, Any], model_name: str
+) -> type[BaseModel]:
     """
     Create a Pydantic model from a JSON schema.
 
@@ -52,7 +120,10 @@ def create_pydantic_model_from_schema(schema: dict[str, Any], model_name: str) -
                     items, model_name=f"{model_name}_{field_name.capitalize()}Item"
                 )
                 if field_name in required:
-                    fields[field_name] = (list[item_model], Field(description=description))
+                    fields[field_name] = (
+                        list[item_model],
+                        Field(description=description),
+                    )
                 else:
                     fields[field_name] = (
                         Optional[list[item_model]],
@@ -64,11 +135,15 @@ def create_pydantic_model_from_schema(schema: dict[str, Any], model_name: str) -
                 enum = items.get("enum", [])
                 if enum:
                     item_python_type = Enum(
-                        f"{model_name}_{field_name.capitalize()}", [(v, v) for v in enum]
+                        f"{model_name}_{field_name.capitalize()}",
+                        [(v, v) for v in enum],
                     )
 
                 if field_name in required:
-                    fields[field_name] = (list[item_python_type], Field(description=description))
+                    fields[field_name] = (
+                        list[item_python_type],
+                        Field(description=description),
+                    )
                 else:
                     fields[field_name] = (
                         Optional[list[item_python_type]],

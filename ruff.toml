@@ -1,0 +1,18 @@
+line-length = 88
+indent-width = 4
+
+
+[lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
+]
+
+[lint.isort]
+combine-as-imports = true
+known-first-party = ["bithuman"]
