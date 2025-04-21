@@ -8,13 +8,13 @@ services:
     container_name: home-assistant-mcp-agent
     restart: unless-stopped
     env_file: envfile
-    environment:
-      - LIVEKIT_URL=${LIVEKIT_URL}
-      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
-      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
-      - HOME_ASSISTANT_MCP_URL=${HOME_ASSISTANT_MCP_URL}
-      - HOME_ASSISTANT_TOKEN=${HOME_ASSISTANT_TOKEN}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    # environment:
+    #   - LIVEKIT_URL=${LIVEKIT_URL}
+    #   - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
+    #   - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
+    #   - HOME_ASSISTANT_MCP_URL=${HOME_ASSISTANT_MCP_URL}
+    #   - HOME_ASSISTANT_TOKEN=${HOME_ASSISTANT_TOKEN}
+    #   - OPENAI_API_KEY=${OPENAI_API_KEY}
     networks:
       - home-assistant-network
 
