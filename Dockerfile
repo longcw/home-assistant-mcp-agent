@@ -1,47 +1,29 @@
 ARG PYTHON_VERSION=3.13.1
 FROM python:${PYTHON_VERSION}-slim
 
-# Prevents Python from writing pyc files.
+# Prevents Python from writing pyc files and keeps Python from buffering stdout and stderr
 ENV PYTHONDONTWRITEBYTECODE=1
-
-# Keeps Python from buffering stdout and stderr to avoid situations where
-# the application crashes without emitting any logs due to buffering.
 ENV PYTHONUNBUFFERED=1
 
-# Create a non-privileged user that the app will run under.
-# See https://docs.docker.com/develop/develop-images/dockerfile_best-practices/#user
-ARG UID=10001
-RUN adduser \
-    --disabled-password \
-    --gecos "" \
-    --home "/home/appuser" \
-    --shell "/sbin/nologin" \
-    --uid "${UID}" \
-    appuser
+WORKDIR /app
 
+# Install uv
+RUN pip install uv
 
-# Install gcc and other build dependencies.
-RUN apt-get update && \
-    apt-get install -y \
-    gcc \
-    python3-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Create virtual environment
+RUN uv venv /app/venv
+ENV PATH="/app/venv/bin:$PATH"
 
-USER appuser
-
-RUN mkdir -p /home/appuser/.cache
-RUN chown -R appuser /home/appuser/.cache
-
-WORKDIR /home/appuser
-
+# Copy requirements and install dependencies
 COPY requirements.txt .
-RUN python -m pip install --user --no-cache-dir -r requirements.txt
+RUN uv pip install -r requirements.txt
 
+# Copy application code
 COPY . .
 
-# ensure that any dependent models are downloaded at build-time
+# Ensure that any dependent models are downloaded at build-time
 RUN python agent.py download-files
 
-# Run the application.
+# Run the application
 ENTRYPOINT ["python", "agent.py"]
 CMD ["start"]
