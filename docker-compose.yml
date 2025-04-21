@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  mcp-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: home-assistant-mcp-agent
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - LIVEKIT_URL=${LIVEKIT_URL}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
+      - HOME_ASSISTANT_MCP_URL=${HOME_ASSISTANT_MCP_URL}
+      - HOME_ASSISTANT_TOKEN=${HOME_ASSISTANT_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    networks:
+      - home-assistant-network
+
+networks:
+  home-assistant-network:
+    driver: bridge 
