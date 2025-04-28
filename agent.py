@@ -1,6 +1,9 @@
 import logging
 import os
+import time
 
+import pandas as pd
+import yaml
 from dotenv import load_dotenv
 from livekit import rtc
 from livekit.agents import (
@@ -36,6 +39,7 @@ You are a voice assistant for Home Assistant, designed to help users control the
 - When user ask for a type of device of an area, you should ask which device in the area they want to control
 - When presenting options to users, use natural device names for clarity
 - When executing tool calls, ALWAYS use the exact original device name from the system
+- When user ask for devices in a specific area, get all areas first and match the area name in case of ambiguity
 
 # Communication Style
 - Respond conversationally and confirm actions after completion
@@ -45,10 +49,10 @@ You are a voice assistant for Home Assistant, designed to help users control the
 """  # noqa: E501
 
 
-class FunctionAgent(Agent):
+class HomeAssistantAgent(Agent):
     """A LiveKit agent that uses MCP tools"""
 
-    def __init__(self, *, tools: list[llm.FunctionTool]):
+    def __init__(self, *, tools: list[llm.FunctionTool], mcp_server: MCPServerSse):
         super().__init__(
             instructions=instructions,
             # stt=deepgram.STT(model="nova-2", language="zh-CN"),
@@ -57,10 +61,76 @@ class FunctionAgent(Agent):
             # vad=silero.VAD.load(),
             allow_interruptions=True,
             llm=openai.realtime.RealtimeModel(
-                model="gpt-4o-realtime-preview-2024-12-17", turn_detection=None
+                model="gpt-4o-realtime-preview", turn_detection=None
             ),
             tools=tools,
         )
+        self._mcp = mcp_server
+        self._devices: pd.DataFrame | None = None
+        self._devices_updated_at: float = 0
+        self._devices_timeout_interval = 30
+
+    @llm.function_tool
+    async def get_areas(self) -> list[str]:
+        """Get all areas in the home"""
+        logger.info("get_areas")
+        devices = await self.get_home_state()
+        return devices["areas"].unique().tolist()
+
+    @llm.function_tool
+    async def get_device_domains(self) -> list[str]:
+        """Get all device domains in the home"""
+        logger.info("get_device_domains")
+        devices = await self.get_home_state()
+        return devices["domain"].unique().tolist()
+
+    @llm.function_tool
+    async def get_devices(self, area: str | list[str]) -> str:
+        """Get devices status in the area or areas
+
+        Args:
+            area: The area or list of areas to get devices from.
+        """  # noqa: E501
+        logger.info(f"get_devices: {area}")
+
+        devices = await self.get_home_state(force_update=True)
+        if isinstance(area, str):
+            area = [area]
+        area = [a.strip() for a in area]
+        df = devices[devices["areas"].isin(area)]
+
+        logger.info(f"found {len(df)} devices in {area}")
+        if len(df) == 0:
+            areas = await self.get_areas()
+            return f"No devices found in {area}, available areas: {areas}, try to use the current area name"  # noqa: E501
+        return self.df_to_str(df)
+
+    @llm.function_tool
+    async def get_environment_info(self) -> str:
+        """Get the current environment information like temperature, humidity, etc."""
+        logger.info("get_environment_info")
+        devices = await self.get_home_state(force_update=True)
+        return self.df_to_str(devices[devices["domain"] == "sensor"])
+
+    async def get_home_state(self, force_update: bool = False) -> pd.DataFrame:
+        if (
+            not force_update
+            and self._devices is not None
+            and time.time() - self._devices_updated_at < self._devices_timeout_interval
+        ):
+            return self._devices
+
+        result = await self._mcp.call_tool("get_home_state")
+        content = yaml.safe_load(result.content[0].text)["result"]
+        devices = yaml.safe_load(content)
+        devices = next(iter(devices.values()))
+
+        self._devices = pd.DataFrame(devices)
+        self._devices_updated_at = time.time()
+        return self._devices
+
+    def df_to_str(self, df: pd.DataFrame) -> str:
+        return yaml.dump(list(df.to_dict(orient="index").values()))
 
 
 async def entrypoint(ctx: JobContext):
@@ -75,7 +145,7 @@ async def entrypoint(ctx: JobContext):
     await mcp_server.connect()
 
     agent_tools = await mcp_server.get_agent_tools()
-    agent = FunctionAgent(tools=agent_tools)
+    agent = HomeAssistantAgent(tools=agent_tools, mcp_server=mcp_server)
 
     await ctx.connect()
 

@@ -17,26 +17,26 @@ def mcp_to_function_tool(
     call_tool: Callable[[str, dict[str, Any]], Coroutine[Any, Any, CallToolResult]],
 ) -> FunctionTool:
     """
-    Converts an MCP tool to a FunctionTool.
+    Converts an MCP tool to a FunctionTool using raw schema for OpenAI function calling.
     """
-    schema = tool.inputSchema
     name = tool.name
     description = tool.description
-    ArgsModel = create_pydantic_model_from_schema(schema, tool.name)
 
-    async def tool_impl(tool_input) -> str:
+    # Use the tool's input schema directly as the raw schema for function_tool
+    raw_schema = {
+        "name": name,
+        "description": description,
+        "parameters": tool.inputSchema,
+    }
+
+    async def tool_impl(raw_arguments: dict[str, Any]) -> str:
         """
         Args:
-            tool_input: The input model of the tool
+            raw_arguments: The raw input arguments for the tool
         """
         try:
-            assert isinstance(tool_input, ArgsModel)
-            arguments = tool_input.model_dump()
-        except Exception as e:
-            return f"Error parsing input arguments for tool '{name}': {e}"
-
-        try:
-            arguments = {k: str(v) for k, v in arguments.items() if v is not None}
+            # Convert any non-string values to strings as required by call_tool
+            arguments = {k: str(v) for k, v in raw_arguments.items() if v is not None}
             result = await call_tool(name, arguments)
 
             logger.info(f"Called tool '{name}' with arguments: {arguments}")
@@ -56,18 +56,8 @@ def mcp_to_function_tool(
             logger.error(f"Error calling tool '{name}': {e}")
             return f"Error calling tool '{name}': {e}"
 
-    tool_impl.__signature__ = inspect.Signature(
-        parameters=[
-            inspect.Parameter(
-                name="tool_input",
-                kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                annotation=ArgsModel,
-            )
-        ]
-    )
-    tool_impl.__annotations__ = {"return": str, "tool_input": ArgsModel}
-
-    return function_tool(tool_impl, name=name, description=description)
+    # Use the raw_schema parameter of function_tool
+    return function_tool(tool_impl, raw_schema=raw_schema)
 
 
 # modified from https://github.com/Finndersen/pydanticai_mcp_demo/blob/main/client/mcp_agent/util/schema_to_params.py

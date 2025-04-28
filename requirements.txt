@@ -1,3 +1,4 @@
 mcp
-livekit-agents[openai]>=1.0.0
+livekit-agents[openai]>=1.0.17
 python-dotenv
+pandas
