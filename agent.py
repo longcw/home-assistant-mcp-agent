@@ -1,10 +1,22 @@
+import logging
 import os
 
 from dotenv import load_dotenv
+from livekit import rtc
+from livekit.agents import (
+    Agent,
+    AgentSession,
+    JobContext,
+    JobRequest,
+    WorkerOptions,
+    cli,
+    llm,
+)
+from livekit.plugins import openai
+
 from mcp_client import MCPServerSse
 
-from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli, llm
-from livekit.plugins import openai
+logger = logging.getLogger("ha-mcp-agent")
 
 load_dotenv()
 
@@ -44,7 +56,9 @@ class FunctionAgent(Agent):
             # tts=cartesia.TTS(language="zh"),
             # vad=silero.VAD.load(),
             allow_interruptions=True,
-            llm=openai.realtime.RealtimeModel(model="gpt-4o-realtime-preview-2024-12-17"),
+            llm=openai.realtime.RealtimeModel(
+                model="gpt-4o-realtime-preview-2024-12-17", turn_detection=None
+            ),
             tools=tools,
         )
 
@@ -67,10 +81,41 @@ async def entrypoint(ctx: JobContext):
 
     session = AgentSession()
     await session.start(agent=agent, room=ctx.room)
+    room_io = session._room_io
 
-    session.generate_reply(user_input="你好")
+    # session.generate_reply(user_input="你好")
+
+    # disable input audio at the start
+    session.input.set_audio_enabled(False)
+
+    @ctx.room.local_participant.register_rpc_method("start_turn")
+    async def start_turn(data: rtc.RpcInvocationData):
+        session.interrupt()
+        session.clear_user_turn()
+
+        # listen to the caller if multi-user
+        room_io.set_participant(data.caller_identity)
+        session.input.set_audio_enabled(True)
+
+    @ctx.room.local_participant.register_rpc_method("end_turn")
+    async def end_turn(data: rtc.RpcInvocationData):
+        session.input.set_audio_enabled(False)
+        session.commit_user_turn()
+
+    @ctx.room.local_participant.register_rpc_method("cancel_turn")
+    async def cancel_turn(data: rtc.RpcInvocationData):
+        session.input.set_audio_enabled(False)
+        session.clear_user_turn()
+        logger.info("cancel turn")
+
+
+async def handle_request(request: JobRequest) -> None:
+    await request.accept(
+        identity="ptt-agent",
+        # this attribute communicates to frontend that we support PTT
+        attributes={"push-to-talk": "1"},
+    )
 
 
 if __name__ == "__main__":
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
-    # asyncio.run(main())
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, request_fnc=handle_request))
