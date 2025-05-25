@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import time
@@ -9,15 +10,18 @@ from livekit import rtc
 from livekit.agents import (
     Agent,
     AgentSession,
+    AgentStateChangedEvent,
     JobContext,
+    JobProcess,
     JobRequest,
+    UserStateChangedEvent,
     WorkerOptions,
     cli,
     llm,
+    mcp,
+    utils,
 )
-from livekit.plugins import openai
-
-from mcp_client import MCPServerSse
+from livekit.plugins import openai, silero
 
 logger = logging.getLogger("ha-mcp-agent")
 
@@ -52,18 +56,15 @@ You are a voice assistant for Home Assistant, designed to help users control the
 class HomeAssistantAgent(Agent):
     """A LiveKit agent that uses MCP tools"""
 
-    def __init__(self, *, tools: list[llm.FunctionTool], mcp_server: MCPServerSse):
+    def __init__(self, *, mcp_server: mcp.MCPServer):
         super().__init__(
             instructions=instructions,
-            # stt=deepgram.STT(model="nova-2", language="zh-CN"),
-            # llm=openai.LLM(model="gpt-4o"),
-            # tts=cartesia.TTS(language="zh"),
-            # vad=silero.VAD.load(),
-            allow_interruptions=True,
+            mcp_servers=[mcp_server],
             llm=openai.realtime.RealtimeModel(
-                model="gpt-4o-realtime-preview", turn_detection=None
+                voice="alloy",
+                model="gpt-4o-realtime-preview",
+                turn_detection=None,  # disable server side turn detection
             ),
-            tools=tools,
         )
         self._mcp = mcp_server
         self._devices: pd.DataFrame | None = None
@@ -120,7 +121,7 @@ class HomeAssistantAgent(Agent):
         ):
             return self._devices
 
-        result = await self._mcp.call_tool("get_home_state")
+        result = await self._mcp._client.call_tool("get_home_state")
         content = yaml.safe_load(result.content[0].text)["result"]
         devices = yaml.safe_load(content)
         devices = next(iter(devices.values()))
@@ -133,39 +134,107 @@ class HomeAssistantAgent(Agent):
         return yaml.dump(list(df.to_dict(orient="index").values()))
 
 
+class IdleAgent(Agent):
+    """An agent that does nothing"""
+
+    def __init__(self):
+        super().__init__(instructions="not needed", tts=None, vad=None)
+
+
 async def entrypoint(ctx: JobContext):
-    mcp_server = MCPServerSse(
-        params={
-            "url": os.getenv("HOME_ASSISTANT_MCP_URL"),
-            "headers": {"Authorization": f"Bearer {os.getenv('HOME_ASSISTANT_TOKEN')}"},
-        },
-        cache_tools_list=True,
-        name="Home Assistant MCP Server",
+    ha_url = os.getenv("HOME_ASSISTANT_MCP_URL")
+    if not ha_url:
+        raise ValueError("HOME_ASSISTANT_MCP_URL is not set")
+    ha_token = os.getenv("HOME_ASSISTANT_TOKEN")
+    if not ha_token:
+        raise ValueError("HOME_ASSISTANT_TOKEN is not set")
+    mcp_server = mcp.MCPServerHTTP(
+        url=ha_url, headers={"Authorization": f"Bearer {ha_token}"}
     )
-    await mcp_server.connect()
-
-    agent_tools = await mcp_server.get_agent_tools()
-    agent = HomeAssistantAgent(tools=agent_tools, mcp_server=mcp_server)
-
     await ctx.connect()
 
-    session = AgentSession()
-    await session.start(agent=agent, room=ctx.room)
-    room_io = session._room_io
+    agent = HomeAssistantAgent(mcp_server=mcp_server)
+    idle_agent = IdleAgent()
 
-    # session.generate_reply(user_input="你好")
+    # push-to-talk mode: client call the start_turn and end_turn methods
+    # vad mode: client call the start_turn (based on keywords), vad call the end_turn
+    rparticipant = await utils.wait_for_participant(ctx.room)
+    support_ptt = rparticipant.attributes.get("supports-ptt", "0") == "1"
+    logger.info(f"supports-ptt: {support_ptt}")
+
+    # create session
+    session = AgentSession(
+        turn_detection="manual" if support_ptt else "vad",
+        vad=ctx.proc.userdata["vad"],
+        tts=openai.TTS(voice="alloy"),
+    )
+    await session.start(
+        agent=agent if support_ptt else idle_agent,
+        room=ctx.room,
+    )
+    room_io = session._room_io
 
     # disable input audio at the start
     session.input.set_audio_enabled(False)
 
+    audio_toggle: asyncio.TimerHandle | None = None
+
+    if not support_ptt:
+        loop = asyncio.get_event_loop()
+        idle_toggle: asyncio.TimerHandle | None = None
+
+        def reset_idle_timer(delay: float | None = 60):
+            nonlocal idle_toggle
+            if idle_toggle:
+                idle_toggle.cancel()
+
+            if delay is not None:
+                logger.info(f"mark agent as idle in {delay} seconds")
+                idle_toggle = loop.call_later(delay, session.update_agent, idle_agent)
+
+        @session.on("user_state_changed")
+        def on_user_state_changed(ev: UserStateChangedEvent):
+            if ev.new_state == "listening":
+                reset_idle_timer(60)
+
+        @session.on("agent_state_changed")
+        def on_agent_state_changed(ev: AgentStateChangedEvent):
+            nonlocal audio_toggle
+            if session.input.audio_enabled and ev.new_state == "speaking":
+                reset_idle_timer(None)
+                if audio_toggle:
+                    audio_toggle.cancel()
+                session.input.set_audio_enabled(False)
+
+            elif not session.input.audio_enabled and ev.new_state == "listening":
+                reset_idle_timer(60)
+                if audio_toggle:
+                    audio_toggle.cancel()
+
+                audio_toggle = loop.call_later(
+                    1.0, session.input.set_audio_enabled, True
+                )
+                logger.info("enable agent audio input in 1 second")
+
     @ctx.room.local_participant.register_rpc_method("start_turn")
     async def start_turn(data: rtc.RpcInvocationData):
+        if session.current_agent != agent:
+            session.update_agent(agent)
+            await session._update_activity_atask
+
+        if audio_toggle:
+            audio_toggle.cancel()
+
         session.interrupt()
         session.clear_user_turn()
 
         # listen to the caller if multi-user
         room_io.set_participant(data.caller_identity)
-        session.input.set_audio_enabled(True)
+
+        if not support_ptt:
+            await session.say("我在！")
+        else:
+            session.input.set_audio_enabled(True)
 
     @ctx.room.local_participant.register_rpc_method("end_turn")
     async def end_turn(data: rtc.RpcInvocationData):
@@ -187,5 +256,13 @@ async def handle_request(request: JobRequest) -> None:
     )
 
 
+def prewarm(proc: JobProcess):
+    proc.userdata["vad"] = silero.VAD.load()
+
+
 if __name__ == "__main__":
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, request_fnc=handle_request))
+    cli.run_app(
+        WorkerOptions(
+            entrypoint_fnc=entrypoint, request_fnc=handle_request, prewarm_fnc=prewarm
+        )
+    )

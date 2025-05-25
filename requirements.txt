@@ -1,5 +1,5 @@
 mcp
-livekit-agents[openai]>=1.0.17
+livekit-agents[openai,silero]>=1.0.22
 python-dotenv
 pandas
 PyYAML
