@@ -1,10 +1,6 @@
 ARG PYTHON_VERSION=3.13.1
 FROM python:${PYTHON_VERSION}-slim
 
-# Prevents Python from writing pyc files and keeps Python from buffering stdout and stderr
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
 WORKDIR /app
 
 # Install uv

@@ -1,12 +1,10 @@
-version: '3.8'
-
 services:
   mcp-agent:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: home-assistant-mcp-agent
-    restart: unless-stopped
+    restart: always
     env_file: envfile
     # environment:
     #   - LIVEKIT_URL=${LIVEKIT_URL}
