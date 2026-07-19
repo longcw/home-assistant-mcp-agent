@@ -42,6 +42,13 @@ TTS_LANGUAGE = os.getenv("TTS_LANGUAGE", "")
 # Explicit-dispatch name; the frontend dispatches this worker by name.
 AGENT_NAME = os.getenv("AGENT_NAME", "ha-agent")
 
+# The system prompt lives in a separate file (YAML: `instructions: |`) so it can be
+# tweaked without rebuilding the image: it is bind-mounted into the container (see
+# docker-compose.yml) and re-read on each session. Override the path with PROMPT_FILE.
+PROMPT_FILE = os.getenv(
+    "PROMPT_FILE", os.path.join(os.path.dirname(__file__), "prompt.yaml")
+)
+
 # STT is billed continuously, so it follows the mic: enabled whenever audio input is
 # live, and torn down this many seconds after the mic is gated. The grace period avoids
 # re-initialising STT on quick successive turns. Applies uniformly to manual and auto.
@@ -91,31 +98,20 @@ def _text_result_resolver(ctx: mcp.MCPToolResultContext) -> str:
     return json.dumps([item.model_dump() for item in ctx.result.content])
 
 
-instructions = """
-You are a voice assistant for Home Assistant, designed to help users control their smart home devices.
-You control devices by calling the tools exposed by the Home Assistant MCP server (e.g. HassTurnOn, HassTurnOff, HassLightSet).
+def load_instructions() -> str:
+    """Read the agent's system prompt from PROMPT_FILE (a YAML `instructions` key).
 
-# Device Control Guidelines
-- Before controlling any device, use get_devices or GetLiveContext to confirm the exact device name and current state
-- Reuse previous query results when appropriate to avoid redundant status checks
-- When a device name contains a comma, use the portion after the comma (the alias) for control
-- You MUST use the exact original device name from the system when calling a tool, keep the multiple spaces in the original name
-
-# Handling Ambiguous Requests
-- If the requested device cannot be found, identify and suggest similar alternatives, e.g. 书房的射灯 -> 书房照明  射灯 右键 (follow the actual device name)
-- Users may mix area references in spoken language (e.g., 厨房/kitchen and 餐厅/dining room) - find the device based on name in possible areas
-- When a user asks for a type of device in an area, ask which device in the area they want to control
-- When presenting options to users, use natural device names for clarity
-- When executing tool calls, ALWAYS use the exact original device name from the system
-- When a user asks for devices in a specific area, call get_areas first and match the area name in case of ambiguity
-
-# Communication Style
-- Respond conversationally and confirm actions after completion
-- Be concise but helpful in your explanations
-- Acknowledge when you're checking device status or performing actions
-- Use the same language as the user
-- Do not use emojis, markdown, or other special characters in your spoken responses
-"""  # noqa: E501
+    Read fresh per session so editing the mounted prompt file applies to the next
+    conversation without rebuilding the image.
+    """
+    with open(PROMPT_FILE, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    instructions = data.get("instructions")
+    if not isinstance(instructions, str) or not instructions.strip():
+        raise RuntimeError(
+            f"no non-empty 'instructions' in prompt file {PROMPT_FILE!r}"
+        )
+    return instructions.strip()
 
 
 class HomeAssistantAgent(Agent):
@@ -135,7 +131,7 @@ class HomeAssistantAgent(Agent):
                 tool_result_resolver=_text_result_resolver,
             ),
         )
-        super().__init__(instructions=instructions, tools=[toolset])
+        super().__init__(instructions=load_instructions(), tools=[toolset])
 
         self._mcp_toolset = toolset
         self._devices: pd.DataFrame | None = None

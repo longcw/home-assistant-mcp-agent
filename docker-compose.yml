@@ -6,6 +6,11 @@ services:
     restart: always
     # HA_URL, HA_TOKEN, LIVEKIT_* and LIVEKIT_INFERENCE_* — see .env.example
     env_file: .env
+    volumes:
+      # System prompt is mounted (not baked in) so edits apply on the next conversation
+      # with no image rebuild — edit agent/prompt.yaml, then `docker compose restart agent`
+      # (or just start a new conversation, since it's re-read per session).
+      - ./agent/prompt.yaml:/app/prompt.yaml:ro
     networks:
       - home-assistant-network
 
