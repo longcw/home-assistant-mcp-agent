@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "LiveKit Voice Assistant",
+        "description": "Connect your LiveKit project so the dashboard card can talk to your voice agent worker.",
+        "data": {
+          "livekit_url": "LiveKit server URL",
+          "api_key": "LiveKit API key",
+          "api_secret": "LiveKit API secret",
+          "agent_name": "Agent name (explicit dispatch)"
+        },
+        "data_description": {
+          "livekit_url": "e.g. wss://your-project.livekit.cloud",
+          "agent_name": "Must match AGENT_NAME in agent/agent.py (default: ha-agent)"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "LiveKit Voice Assistant is already configured."
+    }
+  }
+}

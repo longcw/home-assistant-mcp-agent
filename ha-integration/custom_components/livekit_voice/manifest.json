@@ -1,0 +1,14 @@
+{
+  "domain": "livekit_voice",
+  "name": "LiveKit Voice Assistant",
+  "version": "0.1.0",
+  "documentation": "https://github.com/longcw/home-assistant-mcp-agent/tree/main/ha-integration",
+  "issue_tracker": "https://github.com/longcw/home-assistant-mcp-agent/issues",
+  "codeowners": ["@longcw"],
+  "dependencies": ["http", "frontend"],
+  "config_flow": true,
+  "single_config_entry": true,
+  "integration_type": "service",
+  "iot_class": "cloud_push",
+  "requirements": ["livekit-api>=1.0.0"]
+}

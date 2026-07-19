@@ -1,0 +1,8 @@
+# Node toolchain for building the card (build output IS committed so the HA host,
+# which has no Node, can serve the card straight from the repo).
+card/node_modules/
+card/pnpm-lock.yaml.bak
+
+# Python
+__pycache__/
+*.pyc
