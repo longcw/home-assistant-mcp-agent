@@ -18,10 +18,6 @@ eggs/
 .eggs/
 lib/
 lib64/
-# `lib/` above is a Python build-artifact pattern; it must not swallow the
-# frontend's application source directory (frontend/lib).
-!frontend/lib/
-!frontend/lib/**
 parts/
 sdist/
 var/

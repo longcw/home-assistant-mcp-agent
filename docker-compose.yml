@@ -9,18 +9,6 @@ services:
     networks:
       - home-assistant-network
 
-  frontend:
-    build:
-      context: ./frontend
-    container_name: home-assistant-mcp-frontend
-    restart: always
-    # LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET — see frontend/.env.example
-    env_file: ./frontend/.env.local
-    ports:
-      - "3000:3000"
-    networks:
-      - home-assistant-network
-
 networks:
   home-assistant-network:
     driver: bridge
