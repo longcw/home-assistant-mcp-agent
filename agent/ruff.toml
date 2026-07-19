@@ -15,4 +15,3 @@ select = [
 
 [lint.isort]
 combine-as-imports = true
-known-first-party = ["bithuman"]

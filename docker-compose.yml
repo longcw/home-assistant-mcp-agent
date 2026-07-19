@@ -1,21 +1,26 @@
 services:
-  mcp-agent:
+  agent:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ./agent
     container_name: home-assistant-mcp-agent
     restart: always
-    env_file: envfile
-    # environment:
-    #   - LIVEKIT_URL=${LIVEKIT_URL}
-    #   - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
-    #   - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
-    #   - HOME_ASSISTANT_MCP_URL=${HOME_ASSISTANT_MCP_URL}
-    #   - HOME_ASSISTANT_TOKEN=${HOME_ASSISTANT_TOKEN}
-    #   - OPENAI_API_KEY=${OPENAI_API_KEY}
+    # HA_URL, HA_TOKEN, LIVEKIT_* and LIVEKIT_INFERENCE_* — see .env.example
+    env_file: .env
+    networks:
+      - home-assistant-network
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: home-assistant-mcp-frontend
+    restart: always
+    # LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET — see frontend/.env.example
+    env_file: ./frontend/.env.local
+    ports:
+      - "3000:3000"
     networks:
       - home-assistant-network
 
 networks:
   home-assistant-network:
-    driver: bridge 
+    driver: bridge
