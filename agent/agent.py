@@ -16,6 +16,7 @@ from livekit.agents import (
     JobContext,
     ToolExecutionUpdatedEvent,
     TurnHandlingOptions,
+    UserStateChangedEvent,
     cli,
     inference,
     mcp,
@@ -42,6 +43,11 @@ TTS_LANGUAGE = os.getenv("TTS_LANGUAGE", "")
 # Explicit-dispatch name; the frontend dispatches this worker by name.
 AGENT_NAME = os.getenv("AGENT_NAME", "ha-agent")
 
+# After the user and agent are both silent for this long, mark the user "away". In
+# manual (push-to-talk) mode that's our cue to tear down the STT+VAD pipeline so an
+# idle-but-open session stops paying for speech models nobody is using.
+USER_AWAY_TIMEOUT = float(os.getenv("USER_AWAY_TIMEOUT", "60"))
+
 # The Home Assistant MCP Server integration exposes a Streamable HTTP endpoint at
 # /api/mcp — see https://www.home-assistant.io/integrations/mcp_server/
 HA_MCP_PATH = "/api/mcp"
@@ -54,6 +60,11 @@ LIVE_CONTEXT_TOOL = "GetLiveContext"
 # so the UI can render tool cards; the state tools return YAML so the same stream also
 # powers the device/sensor status cards.
 TOOL_CALL_TOPIC = "ha.tool_call"
+
+# Data-channel topic carrying the STT pipeline's active/inactive state so the frontend
+# can show whether the agent is currently listening (STT live) or dozing (STT torn down
+# to save cost while the user is away). Payload: {"stt_active": bool}.
+SPEECH_STATE_TOPIC = "ha.speech_state"
 
 # Keep forwarded tool outputs under LiveKit's data-packet size budget. Large enough that
 # a normal home-state YAML payload stays intact (and stays parseable) for the UI cards.
@@ -300,23 +311,125 @@ async def entrypoint(ctx: JobContext) -> None:
     # One detector instance, reused whenever we flip back to auto.
     turn_detector = inference.TurnDetector()
 
+    # Hold explicit STT + VAD instances so we can detach them and later rewire the exact
+    # same objects via Agent.update_options (see _set_speech_pipeline_enabled). The VAD
+    # is the same bundled Silero the session would otherwise create by default.
+    stt = inference.STT(STT_MODEL, language=STT_LANGUAGE)
+    vad = inference.VAD(model="silero")
+
+    agent = HomeAssistantAgent()
     session = AgentSession(
-        stt=inference.STT(STT_MODEL, language=STT_LANGUAGE),
+        stt=stt,
         llm=inference.LLM(LLM_MODEL),
         tts=inference.TTS(TTS_MODEL, voice=TTS_VOICE, language=TTS_LANGUAGE),
+        vad=vad,
         turn_handling=TurnHandlingOptions(
             turn_detection="manual" if start_manual else turn_detector,
         ),
+        user_away_timeout=USER_AWAY_TIMEOUT,
         max_tool_steps=8,
     )
 
-    await session.start(agent=HomeAssistantAgent(), room=ctx.room)
+    await session.start(agent=agent, room=ctx.room)
     await ctx.connect()
 
     _forward_tool_events(ctx, session)
 
+    # Current turn-detection mode, and whether STT is currently torn down.
+    is_manual = start_manual
+    speech_disabled = False
+
+    _publish_tasks: set[asyncio.Task[None]] = set()
+
+    def _publish_speech_state(active: bool) -> None:
+        """Broadcast the STT pipeline's active/inactive state to the frontend."""
+        payload = json.dumps({"stt_active": active})
+
+        async def _send() -> None:
+            try:
+                await ctx.room.local_participant.publish_data(
+                    payload, topic=SPEECH_STATE_TOPIC, reliable=True
+                )
+            except Exception:
+                logger.exception("failed to publish speech state")
+
+        task = asyncio.create_task(_send())
+        _publish_tasks.add(task)
+        task.add_done_callback(_publish_tasks.discard)
+
+    def _disable_speech_pipeline() -> None:
+        """Drop the billed STT (and, in manual mode, the VAD) while the user is away.
+
+        Manual mode also drops the VAD because the start_turn RPC (not the VAD) is what
+        brings the pipeline back. Auto mode keeps the (local, unbilled) Silero VAD alive
+        so it can still hear the next turn and trigger the STT to come back; only the
+        continuously-streamed, billed STT is torn down. No-op if already disabled.
+        """
+        nonlocal speech_disabled
+        if speech_disabled:
+            return
+        if is_manual:
+            agent.update_options(stt=None, vad=None)
+        else:
+            agent.update_options(stt=None)
+        speech_disabled = True
+        logger.info(
+            "speech pipeline disabled (%s) to save cost while away",
+            "STT+VAD" if is_manual else "STT",
+        )
+        _publish_speech_state(active=False)
+
+    def _enable_speech_pipeline() -> None:
+        """Rewire and prewarm the STT + VAD instances. No-op if already enabled."""
+        nonlocal speech_disabled
+        if not speech_disabled:
+            return
+        agent.update_options(stt=stt, vad=vad)
+        speech_disabled = False
+        logger.info("speech pipeline enabled (STT+VAD)")
+        _publish_speech_state(active=True)
+
+    def _release_speech_pipeline_if_idle() -> None:
+        """Tear down the pipeline when the user is away and no turn is in progress.
+
+        ``away`` only fires after the user and agent are both silent for
+        user_away_timeout, so it already implies the turn ended. In manual mode we also
+        require the audio gate to be closed, so a push-to-talk turn that was opened but
+        stayed silent isn't dropped mid-turn. Called from the away edge and from
+        end/cancel_turn: pressing start_turn while already away and then ending without
+        speaking leaves user_state pinned at "away" (no VAD speech), so no fresh
+        user_state_changed event would otherwise fire to trigger the teardown.
+        """
+        if session.user_state != "away":
+            return
+        if is_manual and session.input.audio_enabled:
+            return
+        _disable_speech_pipeline()
+
+    @session.on("user_state_changed")
+    def _on_user_state_changed(ev: UserStateChangedEvent) -> None:
+        if ev.new_state == "away":
+            _release_speech_pipeline_if_idle()
+        elif ev.new_state == "speaking":
+            # Auto mode: the VAD heard the user again, so bring STT back for this turn.
+            # (Manual mode re-enables in start_turn before the mic opens; no-op here.)
+            _enable_speech_pipeline()
+
+    # Publish the initial state, and re-assert it to any participant that (re)connects,
+    # so a frontend that joins mid-session sees the current STT status right away.
+    _publish_speech_state(active=not speech_disabled)
+
+    @ctx.room.on("participant_connected")
+    def _on_participant_connected(_participant: rtc.RemoteParticipant) -> None:
+        _publish_speech_state(active=not speech_disabled)
+
     def apply_mode(manual: bool) -> None:
         """Switch turn detection live and gate audio input to match the new mode."""
+        nonlocal is_manual
+        is_manual = manual
+        # Start each mode from a fully-live pipeline (auto turn detection needs a live
+        # VAD and STT); the away timer re-tears-down later if the user goes idle.
+        _enable_speech_pipeline()
         session.update_options(turn_detection="manual" if manual else turn_detector)
         if manual:
             # Manual mode starts idle: drop any half-formed turn and mute input until
@@ -341,6 +454,8 @@ async def entrypoint(ctx: JobContext) -> None:
 
     @ctx.room.local_participant.register_rpc_method("start_turn")
     async def start_turn(data: rtc.RpcInvocationData) -> str:
+        # Bring STT+VAD back if they were torn down while the user was away.
+        _enable_speech_pipeline()
         session.interrupt()
         session.clear_user_turn()
         # listen only to the participant who started the turn (multi-user rooms)
@@ -352,6 +467,7 @@ async def entrypoint(ctx: JobContext) -> None:
     async def end_turn(data: rtc.RpcInvocationData) -> str:
         session.input.set_audio_enabled(False)
         session.commit_user_turn()
+        _release_speech_pipeline_if_idle()
         return "ok"
 
     @ctx.room.local_participant.register_rpc_method("cancel_turn")
@@ -359,6 +475,7 @@ async def entrypoint(ctx: JobContext) -> None:
         session.input.set_audio_enabled(False)
         session.clear_user_turn()
         logger.info("cancel turn")
+        _release_speech_pipeline_if_idle()
         return "ok"
 
 
