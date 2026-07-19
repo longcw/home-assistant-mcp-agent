@@ -35,9 +35,9 @@ load_dotenv()
 STT_MODEL = os.getenv("STT_MODEL", "assemblyai/universal-3-5-pro")
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "multi")
 LLM_MODEL = os.getenv("LLM_MODEL", "google/gemma-4-31b-it")
-TTS_MODEL = os.getenv("TTS_MODEL", "cartesia/sonic-3")
-TTS_VOICE = os.getenv("TTS_VOICE", "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc")
-TTS_LANGUAGE = os.getenv("TTS_LANGUAGE", "zh")
+TTS_MODEL = os.getenv("TTS_MODEL", "fishaudio/s2.1-pro")
+TTS_VOICE = os.getenv("TTS_VOICE", "5c353fdb312f4888836a9a5680099ef0")
+TTS_LANGUAGE = os.getenv("TTS_LANGUAGE", "")
 
 # Explicit-dispatch name; the frontend dispatches this worker by name.
 AGENT_NAME = os.getenv("AGENT_NAME", "ha-agent")
@@ -291,16 +291,21 @@ def _forward_tool_events(ctx: JobContext, session: AgentSession) -> None:
 async def entrypoint(ctx: JobContext) -> None:
     ctx.log_context_fields = {"room": ctx.room.name}
 
-    push_to_talk = _push_to_talk_requested(ctx)
-    logger.info("input mode: %s", "push-to-talk" if push_to_talk else "auto")
+    # The mode can be switched live from the frontend (set_turn_mode RPC). Room metadata
+    # only picks which mode we boot in: auto = the model detects turns and the mic stays
+    # live; manual = explicit push-to-talk-style turns via start/end/cancel_turn.
+    start_manual = _push_to_talk_requested(ctx)
+    logger.info("initial input mode: %s", "manual" if start_manual else "auto")
+
+    # One detector instance, reused whenever we flip back to auto.
+    turn_detector = inference.TurnDetector()
 
     session = AgentSession(
         stt=inference.STT(STT_MODEL, language=STT_LANGUAGE),
         llm=inference.LLM(LLM_MODEL),
         tts=inference.TTS(TTS_MODEL, voice=TTS_VOICE, language=TTS_LANGUAGE),
         turn_handling=TurnHandlingOptions(
-            # manual turns for push-to-talk; otherwise let the model detect turns
-            turn_detection="manual" if push_to_talk else inference.TurnDetector(),
+            turn_detection="manual" if start_manual else turn_detector,
         ),
         max_tool_steps=8,
     )
@@ -310,12 +315,29 @@ async def entrypoint(ctx: JobContext) -> None:
 
     _forward_tool_events(ctx, session)
 
-    if not push_to_talk:
-        # automatic turn detection: the microphone stays live, no RPC wiring needed
-        return
+    def apply_mode(manual: bool) -> None:
+        """Switch turn detection live and gate audio input to match the new mode."""
+        session.update_options(turn_detection="manual" if manual else turn_detector)
+        if manual:
+            # Manual mode starts idle: drop any half-formed turn and mute input until
+            # the user opens a turn with start_turn.
+            session.clear_user_turn()
+            session.input.set_audio_enabled(False)
+        else:
+            # Auto mode: keep the mic live so the model can detect turns.
+            session.input.set_audio_enabled(True)
 
-    # push-to-talk: disable audio input until the user presses the talk button
-    session.input.set_audio_enabled(False)
+    # Boot the audio gate to match the initial mode (session already has the right
+    # detector, so only the gate needs setting here).
+    if start_manual:
+        session.input.set_audio_enabled(False)
+
+    @ctx.room.local_participant.register_rpc_method("set_turn_mode")
+    async def set_turn_mode(data: rtc.RpcInvocationData) -> str:
+        manual = data.payload == "manual"
+        logger.info("set turn mode: %s", "manual" if manual else "auto")
+        apply_mode(manual)
+        return "ok"
 
     @ctx.room.local_participant.register_rpc_method("start_turn")
     async def start_turn(data: rtc.RpcInvocationData) -> str:
