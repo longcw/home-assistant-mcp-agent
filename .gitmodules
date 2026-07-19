@@ -1,0 +1,3 @@
+[submodule "ha-livekit-agent-frontend"]
+	path = ha-livekit-agent-frontend
+	url = https://github.com/longcw/ha-livekit-agent-frontend
