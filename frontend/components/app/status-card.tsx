@@ -120,13 +120,13 @@ function EntityTile({ entity }: { entity: HomeEntity }) {
   );
 }
 
-export function StatusCard({ snapshot }: { snapshot: HomeStateSnapshot }) {
+export function StatusCard({ snapshot, query }: { snapshot: HomeStateSnapshot; query?: string }) {
   const [expanded, setExpanded] = useState(false);
   const label = snapshot.kind === 'environment' ? 'Environment' : snapshot.title;
 
   const sorted = useMemo(
-    () => sortEntitiesByRelevance(snapshot.entities, snapshot.kind),
-    [snapshot.entities, snapshot.kind]
+    () => sortEntitiesByRelevance(snapshot.entities, snapshot.kind, query),
+    [snapshot.entities, snapshot.kind, query]
   );
   const collapsible = sorted.length > COLLAPSED_COUNT;
   const visible = expanded || !collapsible ? sorted : sorted.slice(0, COLLAPSED_COUNT);

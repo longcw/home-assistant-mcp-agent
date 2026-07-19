@@ -17,7 +17,7 @@ import { ToolCallCard } from './tool-call-card';
 
 type FeedItem =
   | { kind: 'message'; id: string; ts: number; role: 'user' | 'assistant'; text: string }
-  | { kind: 'tool'; id: string; ts: number; tool: ToolCall };
+  | { kind: 'tool'; id: string; ts: number; tool: ToolCall; query: string };
 
 interface ConversationFeedProps {
   messages: ReceivedMessage[];
@@ -47,8 +47,21 @@ export function ConversationFeed({
       id: t.callId,
       ts: t.startedAt,
       tool: t,
+      query: '',
     }));
-    return [...msgItems, ...toolItems].sort((a, b) => a.ts - b.ts);
+    const merged = [...msgItems, ...toolItems].sort((a, b) => a.ts - b.ts);
+
+    // Attach the most recent user utterance before each tool call so status cards
+    // can rank entities by what was actually asked (see sortEntitiesByRelevance).
+    let lastUserText = '';
+    for (const item of merged) {
+      if (item.kind === 'message') {
+        if (item.role === 'user') lastUserText = item.text;
+      } else {
+        item.query = lastUserText;
+      }
+    }
+    return merged;
   }, [messages, toolCalls]);
 
   const isEmpty = items.length === 0;
@@ -72,7 +85,7 @@ export function ConversationFeed({
           ) : (
             <div key={item.id} className="is-assistant flex w-full justify-start">
               {item.tool.homeState ? (
-                <StatusCard snapshot={item.tool.homeState} />
+                <StatusCard snapshot={item.tool.homeState} query={item.query} />
               ) : (
                 <ToolCallCard tool={item.tool} />
               )}

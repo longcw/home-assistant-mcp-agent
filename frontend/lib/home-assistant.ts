@@ -141,18 +141,102 @@ function relevanceRank(entity: HomeEntity, kind: HomeStateSnapshot['kind']): num
   return entity.domain ? (DOMAIN_RANK[entity.domain] ?? 15) : 15;
 }
 
+// Bilingual terms that map a spoken request to a domain, so "turn on the AC" /
+// "把空调打开" pushes climate entities to the top of the card.
+const DOMAIN_KEYWORDS: Record<string, string[]> = {
+  light: ['light', 'lamp', '灯', '照明'],
+  climate: [
+    'ac',
+    'air condition',
+    'aircon',
+    'climate',
+    'hvac',
+    'thermostat',
+    '空调',
+    '冷气',
+    '暖气',
+    '制冷',
+    '制热',
+  ],
+  media_player: [
+    'tv',
+    'television',
+    'speaker',
+    'music',
+    'media',
+    'stereo',
+    '电视',
+    '音响',
+    '音乐',
+    '播放',
+  ],
+  fan: ['fan', '风扇', '电扇', '换气'],
+  cover: ['curtain', 'blind', 'shade', 'cover', '窗帘', '百叶', '卷帘'],
+  lock: ['lock', 'door', '门锁', '锁', '门'],
+  switch: ['switch', 'plug', 'outlet', 'socket', '开关', '插座'],
+  vacuum: ['vacuum', 'robot', '扫地', '吸尘'],
+  camera: ['camera', '摄像', '监控'],
+};
+
+const DEVICE_CLASS_KEYWORDS: Record<string, string[]> = {
+  temperature: ['temperature', 'temp', '温度', '气温', '几度', '多少度'],
+  humidity: ['humidity', 'humid', '湿度'],
+  carbon_dioxide: ['co2', 'carbon dioxide', '二氧化碳'],
+  aqi: ['air quality', 'aqi', '空气质量', '空气'],
+  pm25: ['pm2', 'pm2.5', '细颗粒', '空气质量'],
+  pm10: ['pm10'],
+  illuminance: ['illuminance', 'lux', '光照', '亮度', '照度'],
+  power: ['power', 'watt', '功率', '用电', '耗电', '电量'],
+  energy: ['energy', 'kwh', '用电', '耗电'],
+  battery: ['battery', '电池', '电量'],
+  pressure: ['pressure', '气压'],
+};
+
+function nameTokens(name: string): string[] {
+  return name
+    .toLowerCase()
+    .split(/[\s,，、_\-/]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2);
+}
+
 /**
- * Order entities so the most relevant surface first: controllable devices before
- * ambient sensors (device lists), or the common readings first (environment). Active
- * devices win ties so what's currently on floats up. Stable within a rank.
+ * How strongly an entity matches the user's request. A name hit is the strongest
+ * signal (they named the device); a domain/device-class keyword hit is next. 0 when
+ * there is no query or nothing matches, so the static ordering then takes over.
+ */
+function queryRelevance(entity: HomeEntity, query: string): number {
+  if (!query) return 0;
+  const q = query.toLowerCase();
+  let score = 0;
+
+  if (nameTokens(entity.name).some((token) => q.includes(token))) score += 6;
+
+  const domainKeywords = entity.domain && DOMAIN_KEYWORDS[entity.domain];
+  if (domainKeywords && domainKeywords.some((keyword) => q.includes(keyword))) score += 4;
+
+  const classKeywords = entity.deviceClass && DEVICE_CLASS_KEYWORDS[entity.deviceClass];
+  if (classKeywords && classKeywords.some((keyword) => q.includes(keyword))) score += 4;
+
+  return score;
+}
+
+/**
+ * Order entities by relevance to the user's request first (name / domain / device-class
+ * match against `query`), then by a static fallback: controllable devices before ambient
+ * sensors, common readings first for environment. Active devices win ties so what's
+ * currently on floats up. Stable within equal scores.
  */
 export function sortEntitiesByRelevance(
   entities: HomeEntity[],
-  kind: HomeStateSnapshot['kind']
+  kind: HomeStateSnapshot['kind'],
+  query = ''
 ): HomeEntity[] {
   return entities
     .map((entity, index) => ({ entity, index }))
     .sort((a, b) => {
+      const byQuery = queryRelevance(b.entity, query) - queryRelevance(a.entity, query);
+      if (byQuery !== 0) return byQuery;
       const byRank = relevanceRank(a.entity, kind) - relevanceRank(b.entity, kind);
       if (byRank !== 0) return byRank;
       const byActive = Number(isActiveState(b.entity)) - Number(isActiveState(a.entity));
