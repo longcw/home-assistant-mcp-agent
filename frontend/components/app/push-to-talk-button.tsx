@@ -42,12 +42,8 @@ export function PushToTalkButton({ className }: { className?: string }) {
   const rpcTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
 
-  // keep the mic off until the user presses the button
-  useEffect(() => {
-    if (session.isConnected && localParticipant) {
-      localParticipant.setMicrophoneEnabled(false);
-    }
-  }, [session.isConnected, localParticipant]);
+  // The initial mic state per input mode is owned by the session view
+  // (see agent-session-block.tsx). This button only drives the mic per press.
 
   const performRpcWithTimeout = useCallback(
     async (method: string, timeoutMs = 3000): Promise<boolean> => {

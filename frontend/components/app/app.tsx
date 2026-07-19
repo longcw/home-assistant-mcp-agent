@@ -1,7 +1,6 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { TokenSource } from 'livekit-client';
 import { useSession } from '@livekit/components-react';
 import { WarningIcon } from '@phosphor-icons/react/dist/ssr';
 import type { AppConfig } from '@/app-config';
@@ -12,6 +11,7 @@ import { ViewController } from '@/components/app/view-controller';
 import { Toaster } from '@/components/ui/sonner';
 import { useAgentErrors } from '@/hooks/useAgentErrors';
 import { useDebugMode } from '@/hooks/useDebug';
+import { EndpointTokenSource } from '@/lib/endpoint-token-source';
 import { DEFAULT_INPUT_MODE, type InputMode } from '@/lib/input-mode';
 import { getSandboxTokenSource } from '@/lib/utils';
 
@@ -33,9 +33,11 @@ export function App({ appConfig }: AppProps) {
   const [inputMode, setInputMode] = useState<InputMode>(DEFAULT_INPUT_MODE);
 
   const tokenSource = useMemo(() => {
+    // EndpointTokenSource fetches fresh each connect; see its doc comment for the
+    // livekit-client caching bug that otherwise pins the agent to the mount-time turn mode.
     return typeof process.env.NEXT_PUBLIC_CONN_DETAILS_ENDPOINT === 'string'
       ? getSandboxTokenSource(appConfig)
-      : TokenSource.endpoint('/api/token');
+      : new EndpointTokenSource('/api/token');
   }, [appConfig]);
 
   // read at connect time by useSession; updating before start() takes effect

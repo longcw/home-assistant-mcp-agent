@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ from livekit.agents import (
     AgentServer,
     AgentSession,
     JobContext,
+    ToolExecutionUpdatedEvent,
     TurnHandlingOptions,
     cli,
     inference,
@@ -46,6 +48,16 @@ HA_MCP_PATH = "/api/mcp"
 
 # Tool exposed by Home Assistant that returns the live state of all exposed entities.
 LIVE_CONTEXT_TOOL = "GetLiveContext"
+
+# Data-channel topic the frontend listens on (see
+# frontend/hooks/use-home-assistant-feed.ts). It carries the tool-execution lifecycle
+# so the UI can render tool cards; the state tools return YAML so the same stream also
+# powers the device/sensor status cards.
+TOOL_CALL_TOPIC = "ha.tool_call"
+
+# Keep forwarded tool outputs under LiveKit's data-packet size budget. Large enough that
+# a normal home-state YAML payload stays intact (and stays parseable) for the UI cards.
+MAX_TOOL_OUTPUT_CHARS = 12000
 
 
 def home_assistant_mcp_url() -> str:
@@ -159,14 +171,14 @@ class HomeAssistantAgent(Agent):
                 f"No devices found in {area}, available areas: {areas}, "
                 "try to use the current area name"
             )
-        return self.df_to_str(df)
+        return self._df_to_yaml(df)
 
     @function_tool
     async def get_environment_info(self) -> str:
         """Get the current environment information like temperature, humidity, etc."""
         logger.info("get_environment_info")
         devices = await self.get_home_state(force_update=True)
-        return self.df_to_str(devices[devices["domain"] == "sensor"])
+        return self._df_to_yaml(devices[devices["domain"] == "sensor"])
 
     async def get_home_state(self, force_update: bool = False) -> pd.DataFrame:
         if (
@@ -206,7 +218,13 @@ class HomeAssistantAgent(Agent):
         return df[column].dropna().unique().tolist()
 
     @staticmethod
-    def df_to_str(df: pd.DataFrame) -> str:
+    def _df_to_yaml(df: pd.DataFrame) -> str:
+        """Serialize device rows as YAML.
+
+        YAML is compact and readable for the LLM, and the frontend parses this same
+        output to render the status cards (see get_environment_info / get_devices),
+        so it flows over the one tool-execution event with no extra data channel.
+        """
         return yaml.dump(list(df.to_dict(orient="index").values()), allow_unicode=True)
 
 
@@ -230,6 +248,45 @@ def _push_to_talk_requested(ctx: JobContext) -> bool:
     return isinstance(meta, dict) and meta.get("input_mode") == "push_to_talk"
 
 
+def _forward_tool_events(ctx: JobContext, session: AgentSession) -> None:
+    """Stream the tool-execution lifecycle to the frontend over a data channel.
+
+    Each ``tool_execution_updated`` event (started / updated / ended) is serialized
+    and published on ``TOOL_CALL_TOPIC``. A single background consumer preserves
+    ordering, and large tool outputs are truncated to stay within the data-packet size
+    budget, modeled on the upstream ``async_tool_agent`` example.
+    """
+    queue: asyncio.Queue[ToolExecutionUpdatedEvent] = asyncio.Queue()
+
+    @session.on("tool_execution_updated")
+    def _on_tool_execution_updated(ev: ToolExecutionUpdatedEvent) -> None:
+        queue.put_nowait(ev)
+
+    async def _pump() -> None:
+        while True:
+            ev = await queue.get()
+            data = ev.model_dump(mode="json")
+            update = data.get("update", {})
+            message = update.get("message")
+            if isinstance(message, str) and len(message) > MAX_TOOL_OUTPUT_CHARS:
+                update["message"] = message[:MAX_TOOL_OUTPUT_CHARS] + "…"
+            try:
+                await ctx.room.local_participant.publish_data(
+                    json.dumps(data, ensure_ascii=False),
+                    topic=TOOL_CALL_TOPIC,
+                    reliable=True,
+                )
+            except Exception:
+                logger.exception("failed to publish tool event")
+
+    task = asyncio.create_task(_pump())
+
+    async def _cancel_pump() -> None:
+        task.cancel()
+
+    ctx.add_shutdown_callback(_cancel_pump)
+
+
 @server.rtc_session(agent_name=AGENT_NAME)
 async def entrypoint(ctx: JobContext) -> None:
     ctx.log_context_fields = {"room": ctx.room.name}
@@ -245,10 +302,13 @@ async def entrypoint(ctx: JobContext) -> None:
             # manual turns for push-to-talk; otherwise let the model detect turns
             turn_detection="manual" if push_to_talk else inference.TurnDetector(),
         ),
+        max_tool_steps=8,
     )
 
     await session.start(agent=HomeAssistantAgent(), room=ctx.room)
     await ctx.connect()
+
+    _forward_tool_events(ctx, session)
 
     if not push_to_talk:
         # automatic turn detection: the microphone stays live, no RPC wiring needed
