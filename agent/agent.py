@@ -8,7 +8,7 @@ from typing import Any
 import pandas as pd
 import yaml
 from dotenv import load_dotenv
-from livekit import rtc
+from livekit import api, rtc
 from livekit.agents import (
     Agent,
     AgentServer,
@@ -381,6 +381,30 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.info("audio output %s", "enabled" if enabled else "disabled")
         _publish_state()
 
+    async def _set_can_subscribe(identity: str, allow: bool) -> None:
+        """Grant/revoke a participant's track-subscribe permission at runtime.
+
+        The card connects with can_subscribe=False so an idle/text connection has no
+        receive-audio transceiver (which on iOS grabs the audio session and stops the
+        user's music). We allow subscribing only while spoken replies are on.
+        """
+        if not identity:
+            return
+        try:
+            await ctx.api.room.update_participant(
+                api.UpdateParticipantRequest(
+                    room=ctx.room.name,
+                    identity=identity,
+                    permission=api.ParticipantPermission(
+                        can_publish=True,
+                        can_publish_data=True,
+                        can_subscribe=allow,
+                    ),
+                )
+            )
+        except Exception:
+            logger.exception("failed to update subscribe permission for %s", identity)
+
     def apply_mode(manual: bool) -> None:
         """Switch turn detection and gate the mic to match. STT follows the mic."""
         session.update_options(turn_detection="manual" if manual else turn_detector)
@@ -415,8 +439,15 @@ async def entrypoint(ctx: JobContext) -> None:
 
     @ctx.room.local_participant.register_rpc_method("set_audio_output")
     async def set_audio_output(data: rtc.RpcInvocationData) -> str:
-        # payload: "on" | "off" — toggles spoken (TTS) replies; text replies still work.
-        _set_audio_output(data.payload == "on")
+        # payload "on"/"off" toggles spoken (TTS) replies; text replies still work.
+        # Grant subscribe before enabling TTS; revoke after disabling it, so the client
+        # only holds the audio session while replies play. No reconnect either way.
+        on = data.payload == "on"
+        if on:
+            await _set_can_subscribe(data.caller_identity, True)
+        _set_audio_output(on)
+        if not on:
+            await _set_can_subscribe(data.caller_identity, False)
         return "ok"
 
     @ctx.room.local_participant.register_rpc_method("start_turn")
