@@ -21,6 +21,6 @@ COPY . .
 # inference-based pipeline, but future-proofs local plugins)
 RUN uv run -m livekit.agents download-files
 
-# Run the agent worker
-ENTRYPOINT ["uv", "run", "agent.py"]
+# Run the agent worker (sources live under src/; prompt.yaml stays at /app)
+ENTRYPOINT ["uv", "run", "src/main.py"]
 CMD ["start"]

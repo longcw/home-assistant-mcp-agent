@@ -124,17 +124,17 @@ class SchedulerService:
                 self._add_job(task)
             return self._to_out(task)
 
-    def cancel_task(self, task_id: str) -> TaskOut | None:
+    def delete_task(self, task_id: str) -> TaskOut | None:
+        """Hard-delete a task and its run history, and unschedule it."""
         with self._Session() as s:
             task = s.get(Task, task_id)
             if task is None:
                 return None
-            task.status = "cancelled"
-            task.enabled = False
+            out = self._to_out(task)  # snapshot before removal
+            s.delete(task)  # runs cascade via the relationship
             s.commit()
-            s.refresh(task)
-            self._remove_job(task.id)
-            return self._to_out(task)
+        self._remove_job(task_id)
+        return out
 
     def record_run(self, run_id: str, status: str, result: str | None) -> bool:
         """Called from the worker's report endpoint once a task has executed."""

@@ -174,3 +174,6 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Scheduler SQLite DB (bind-mounted from docker-compose; see scheduler/data)
+scheduler/data/

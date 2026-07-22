@@ -27,9 +27,9 @@ class Task(Base):
     run_at: Mapped[str | None] = mapped_column(String(40), nullable=True)  # aware ISO, "once"
     cron: Mapped[str | None] = mapped_column(String(120), nullable=True)  # 5-field, "recurring"
     timezone: Mapped[str] = mapped_column(String(64))
-    # {"type": "function_call", "tool": str, "args": dict} | {"type": "command", "text": str}
+    # {"type": "function_call", "tool": str, "args": dict} | {"type": "instruction", "text": str}
     execution: Mapped[dict] = mapped_column(JSON)
-    # "scheduled" (live) | "completed" (a once task fired) | "cancelled" | "missed"
+    # "scheduled" (live) | "completed" (a once task fired) | "missed"
     status: Mapped[str] = mapped_column(String(16), default="scheduled")
     enabled: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[str] = mapped_column(String(40))

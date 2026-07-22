@@ -88,8 +88,8 @@ def update_task(task_id: str, req: TaskUpdate) -> TaskOut:
 
 
 @app.delete("/tasks/{task_id}", response_model=TaskOut, dependencies=guard)
-def cancel_task(task_id: str) -> TaskOut:
-    out = service.cancel_task(task_id)
+def delete_task(task_id: str) -> TaskOut:
+    out = service.delete_task(task_id)
     if out is None:
         raise HTTPException(status_code=404, detail="task not found")
     return out

@@ -31,17 +31,17 @@ class ScheduleSpec(BaseModel):
 
 
 class ExecutionSpec(BaseModel):
-    type: Literal["command", "function_call"]
-    # "command": natural-language instruction re-interpreted by the LLM at fire time.
+    type: Literal["instruction", "function_call"]
+    # "instruction": natural-language instruction re-interpreted by the LLM at fire time.
     text: Optional[str] = None
-    # "function_call": a Home Assistant MCP tool name + args, replayed deterministically.
+    # "function_call": a tool name (agent or MCP) + args, replayed deterministically.
     tool: Optional[str] = None
     args: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _check(self) -> "ExecutionSpec":
-        if self.type == "command" and not self.text:
-            raise ValueError("text is required when execution.type is 'command'")
+        if self.type == "instruction" and not self.text:
+            raise ValueError("text is required when execution.type is 'instruction'")
         if self.type == "function_call" and not self.tool:
             raise ValueError("tool is required when execution.type is 'function_call'")
         return self

@@ -29,12 +29,14 @@ worker, install that integration, point both at the same LiveKit project, and yo
 
 ```
 .
-├── agent/            # Python LiveKit agent (uv)
-│   ├── agent.py
+├── agent/            # Python LiveKit worker (uv)
+│   ├── src/          # main.py (entrypoint), agent.py, config.py, ha.py, scheduler_client.py, …
+│   ├── prompt.yaml   # system prompt (bind-mounted, edit without a rebuild)
 │   ├── pyproject.toml
 │   └── Dockerfile
+├── scheduler/        # task scheduler service (FastAPI + APScheduler)
 ├── docker-compose.yml
-├── .env.example      # agent env
+├── .env.example      # agent + scheduler env
 └── README.md
 ```
 
@@ -54,7 +56,7 @@ Uses [uv](https://docs.astral.sh/uv/).
 cd agent
 cp ../.env.example ../.env    # then fill in the values (see below)
 uv sync
-uv run agent.py dev           # or `console` to test in the terminal
+uv run src/main.py dev        # or `console` to test in the terminal
 ```
 
 Or with Docker Compose (builds and runs the worker):

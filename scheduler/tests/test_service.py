@@ -62,7 +62,7 @@ def test_reject_past_time(tmp_path):
             TaskCreate(
                 description="past",
                 schedule=ScheduleSpec(type="once", run_at=future_iso(hours=-1), timezone="UTC"),
-                execution=ExecutionSpec(type="command", text="do it"),
+                execution=ExecutionSpec(type="instruction", text="do it"),
             )
         )
 
@@ -74,7 +74,7 @@ def test_reject_bad_cron(tmp_path):
             TaskCreate(
                 description="bad",
                 schedule=ScheduleSpec(type="recurring", cron="not a cron", timezone="UTC"),
-                execution=ExecutionSpec(type="command", text="do it"),
+                execution=ExecutionSpec(type="instruction", text="do it"),
             )
         )
 
@@ -87,7 +87,7 @@ async def test_recurring_task_next_run(tmp_path):
             TaskCreate(
                 description="every morning",
                 schedule=ScheduleSpec(type="recurring", cron="0 8 * * *", timezone="UTC"),
-                execution=ExecutionSpec(type="command", text="good morning"),
+                execution=ExecutionSpec(type="instruction", text="good morning"),
             )
         )
         assert out.schedule_type == "recurring"
@@ -96,17 +96,18 @@ async def test_recurring_task_next_run(tmp_path):
         svc.scheduler.shutdown(wait=False)
 
 
-def test_cancel_task(tmp_path):
+def test_delete_task(tmp_path):
     svc = make_service(tmp_path)
     out = svc.create_task(
         TaskCreate(
             description="x",
             schedule=ScheduleSpec(type="once", run_at=future_iso(hours=1), timezone="UTC"),
-            execution=ExecutionSpec(type="command", text="x"),
+            execution=ExecutionSpec(type="instruction", text="x"),
         )
     )
-    assert svc.cancel_task(out.id).status == "cancelled"
-    assert svc.list_tasks(active_only=True) == []
+    assert svc.delete_task(out.id) is not None
+    assert svc.get_task(out.id) is None
+    assert svc.list_tasks(active_only=False) == []
 
 
 def test_update_reschedule(tmp_path):
@@ -115,7 +116,7 @@ def test_update_reschedule(tmp_path):
         TaskCreate(
             description="x",
             schedule=ScheduleSpec(type="once", run_at=future_iso(hours=1), timezone="UTC"),
-            execution=ExecutionSpec(type="command", text="x"),
+            execution=ExecutionSpec(type="instruction", text="x"),
         )
     )
     new_at = future_iso(hours=3)
@@ -168,7 +169,7 @@ def test_rehydrate_marks_missed(tmp_path):
                 run_at=(datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
                 cron=None,
                 timezone="UTC",
-                execution={"type": "command", "text": "x"},
+                execution={"type": "instruction", "text": "x"},
                 status="scheduled",
                 enabled=True,
                 created_at=service_module._utcnow_iso(),
