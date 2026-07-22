@@ -98,10 +98,10 @@ async def run_scheduled_task(ctx: JobContext, meta: dict[str, Any]) -> None:
 
     await ctx.connect()
     agent = HomeAssistantAgent()
+    etype = execution.get("type")
     status = "success"
     result = ""
     try:
-        etype = execution.get("type")
         if etype == "function_call":
             args = execution.get("args") or {}
             if isinstance(args, str):
@@ -119,7 +119,13 @@ async def run_scheduled_task(ctx: JobContext, meta: dict[str, Any]) -> None:
     result = truncate((result or "").strip(), MAX_TOOL_OUTPUT_CHARS)
     await scheduler.report_run(run_id, status, result)
     if status == "success":
-        await ha.notify("Scheduled task done", f"{description}\n\n{result}".strip())
+        # An instruction's result is the assistant's natural-language reply; a
+        # function_call's is raw tool output, so for those show just the description.
+        if etype == "instruction" and result:
+            message = f"{description}\n\n{result}"
+        else:
+            message = description
+        await ha.notify("Scheduled task done", message.strip())
     else:
         message = f"{description}\n\nError: {result}".strip()
         await ha.notify("Scheduled task failed", message)
