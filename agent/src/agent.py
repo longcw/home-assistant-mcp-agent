@@ -3,6 +3,7 @@
 import json
 import logging
 import time
+from collections.abc import Callable
 from typing import Any, Literal
 
 import pandas as pd
@@ -58,6 +59,9 @@ class HomeAssistantAgent(Agent):
         self._devices: pd.DataFrame | None = None
         self._devices_updated_at: float = 0
         self._devices_timeout_interval = 30
+        # Set by the interactive entrypoint to publish quick replies to the card; None
+        # (e.g. headless runs) makes suggest_replies a no-op.
+        self._suggest_replies_cb: Callable[[list[str]], None] | None = None
 
     def llm_node(self, chat_ctx: ChatContext, tools, model_settings: ModelSettings):
         # Inject the current time fresh each turn, before the last user message.
@@ -128,6 +132,19 @@ class HomeAssistantAgent(Agent):
         logger.info("get_environment_info")
         devices = await self.get_home_state(force_update=True)
         return self._df_to_yaml(devices[devices["domain"] == "sensor"])
+
+    @function_tool
+    async def suggest_replies(self, replies: list[str]) -> None:
+        """Offer up to ~3 one-tap quick replies for your last question, e.g. Yes / No.
+
+        Call this when you ask a yes/no or short-choice question — especially when
+        confirming a schedule. Tapping a chip sends that text as the user's reply, so
+        phrase each option in the user's language as a natural reply.
+        """
+        logger.info("suggest_replies: %s", replies)
+        if self._suggest_replies_cb:
+            self._suggest_replies_cb(replies)
+        return None
 
     # --- Scheduling tools ---
     # These call the scheduler service. Their JSON results flow to the card over the

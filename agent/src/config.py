@@ -79,6 +79,8 @@ LIVE_CONTEXT_TOOL = "GetLiveContext"
 TOOL_CALL_TOPIC = "ha.tool_call"
 # Data-channel topic mirroring session state (stt_enabled / audio_output booleans).
 SESSION_STATE_TOPIC = "ha.speech_state"
+# Data-channel topic carrying one-tap quick replies for the card ({"replies": [...]}).
+SUGGESTIONS_TOPIC = "ha.suggestions"
 # Keep forwarded tool outputs under LiveKit's data-packet size budget, while leaving a
 # normal home-state YAML payload intact and parseable for the UI cards.
 MAX_TOOL_OUTPUT_CHARS = 12000

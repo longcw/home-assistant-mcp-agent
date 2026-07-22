@@ -23,6 +23,7 @@ from agent import HomeAssistantAgent
 from config import (
     MAX_TOOL_OUTPUT_CHARS,
     SESSION_STATE_TOPIC,
+    SUGGESTIONS_TOPIC,
     TOOL_CALL_TOPIC,
     settings,
 )
@@ -221,24 +222,32 @@ async def entrypoint(ctx: JobContext) -> None:
     stt_enabled = True  # session boots with STT wired; torn down in the boot below
     audio_output_enabled = True  # session default; muted at boot
     stt_timer: asyncio.TimerHandle | None = None
-    publish_tasks: set[asyncio.Task[None]] = set()
+    publish_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+
+    async def _publish_loop() -> None:
+        # One consumer so packets go out in enqueue order (no inter-task races); it
+        # carries session-state and quick-reply updates. Cancelled in _on_shutdown.
+        while True:
+            topic, payload = await publish_queue.get()
+            try:
+                await ctx.room.local_participant.publish_data(
+                    payload, topic=topic, reliable=True
+                )
+            except Exception:
+                logger.exception("failed to publish on %s", topic)
+
+    publish_task = asyncio.create_task(_publish_loop())
 
     def _publish_state() -> None:
         payload = json.dumps(
             {"stt_enabled": stt_enabled, "audio_output": audio_output_enabled}
         )
+        publish_queue.put_nowait((SESSION_STATE_TOPIC, payload))
 
-        async def _send() -> None:
-            try:
-                await ctx.room.local_participant.publish_data(
-                    payload, topic=SESSION_STATE_TOPIC, reliable=True
-                )
-            except Exception:
-                logger.exception("failed to publish session state")
+    def _publish_suggestions(replies: list[str]) -> None:
+        publish_queue.put_nowait((SUGGESTIONS_TOPIC, json.dumps({"replies": replies})))
 
-        task = asyncio.create_task(_send())
-        publish_tasks.add(task)
-        task.add_done_callback(publish_tasks.discard)
+    agent._suggest_replies_cb = _publish_suggestions
 
     def _cancel_stt_timer() -> None:
         nonlocal stt_timer
@@ -337,6 +346,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     async def _on_shutdown() -> None:
         _cancel_stt_timer()
+        publish_task.cancel()
 
     ctx.add_shutdown_callback(_on_shutdown)
 
