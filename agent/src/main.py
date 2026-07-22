@@ -19,7 +19,7 @@ from livekit.agents.llm.utils import execute_function_call
 
 import ha
 import scheduler_client as scheduler
-from agent import HomeAssistantAgent
+from agent import HomeAssistantAgent, ToolCall
 from config import (
     MAX_TOOL_OUTPUT_CHARS,
     SESSION_STATE_TOPIC,
@@ -40,12 +40,29 @@ logger = logging.getLogger("ha-mcp-agent")
 
 
 async def _run_instruction(
-    ctx: JobContext, agent: HomeAssistantAgent, text: str
+    ctx: JobContext,
+    agent: HomeAssistantAgent,
+    text: str,
+    prior: list[tuple[str, str]] | None = None,
 ) -> str:
-    """Execute a natural-language instruction as a full text-only run (no STT/TTS).
+    """Run a natural-language instruction as a full text-only turn (no STT/TTS).
 
-    session.run captures the whole turn — tool calls included — not just one reply.
+    session.run captures the whole turn — tool calls included — not just one reply. When
+    ``prior`` deterministic step results are given, they're seeded into the turn so the
+    LLM summarizes / builds on them instead of redoing the work.
     """
+    if prior:
+        seeded = "\n".join(f"- {tool} -> {out}" for tool, out in prior)
+        user_input = (
+            "You already ran these tools for the user and got these results:\n"
+            f"{seeded}\n\n"
+            f"Task: {text}\n\n"
+            "Use the results above where relevant; only call tools again if you still "
+            "need more information."
+        )
+    else:
+        user_input = text
+
     session = AgentSession(llm=inference.LLM(settings.llm_model), max_tool_steps=8)
     await session.start(
         agent=agent,
@@ -56,7 +73,7 @@ async def _run_instruction(
     )
 
     async def _finish() -> Any:
-        return await session.run(user_input=text)
+        return await session.run(user_input=user_input)
 
     try:
         result = await asyncio.wait_for(
@@ -90,6 +107,30 @@ async def _run_function_call(agent: HomeAssistantAgent, tool: str, args: dict) -
     return out.output
 
 
+class StepError(Exception):
+    """A deterministic step failed; carries a user-facing 'step i/N' message."""
+
+
+async def _run_steps(
+    agent: HomeAssistantAgent, steps: list[ToolCall]
+) -> list[tuple[str, str]]:
+    """Run each step in order, stopping at the first failure.
+
+    Returns [(tool, output), ...] for the steps that ran. Raises StepError (with a
+    "failed at step i/N" message) as soon as a step errors, so the remaining steps are
+    skipped — device actions usually depend on the ones before them.
+    """
+    results: list[tuple[str, str]] = []
+    total = len(steps)
+    for i, step in enumerate(steps, start=1):
+        try:
+            out = await _run_function_call(agent, step.tool, step.args)
+        except Exception as exc:  # noqa: BLE001 - reshape into a step-scoped error
+            raise StepError(f"failed at step {i}/{total}: {step.tool} — {exc}") from exc
+        results.append((step.tool, out))
+    return results
+
+
 async def run_scheduled_task(ctx: JobContext, meta: dict[str, Any]) -> None:
     task_id = meta.get("task_id", "")
     run_id = meta.get("run_id", "")
@@ -99,19 +140,21 @@ async def run_scheduled_task(ctx: JobContext, meta: dict[str, Any]) -> None:
 
     await ctx.connect()
     agent = HomeAssistantAgent()
-    etype = execution.get("type")
+    instruction = execution.get("instruction")
     status = "success"
     result = ""
+    ran_instruction = False
     try:
-        if etype == "function_call":
-            args = execution.get("args") or {}
-            if isinstance(args, str):
-                args = json.loads(args or "{}")
-            result = await _run_function_call(agent, execution["tool"], args)
-        elif etype == "instruction":
-            result = await _run_instruction(ctx, agent, execution.get("text") or "")
+        steps = [ToolCall.model_validate(s) for s in (execution.get("steps") or [])]
+        step_results = await _run_steps(agent, steps)
+        if instruction:
+            ran_instruction = True
+            result = await _run_instruction(ctx, agent, instruction, prior=step_results)
+        elif step_results:
+            # Pure deterministic batch: record what ran (raw tool outputs) for history.
+            result = "\n".join(f"{tool}: {out}" for tool, out in step_results)
         else:
-            raise ValueError(f"unknown execution type {etype!r}")
+            result = "Done."
     except Exception as exc:  # noqa: BLE001 - any failure is recorded + notified
         status = "error"
         result = str(exc)
@@ -120,9 +163,9 @@ async def run_scheduled_task(ctx: JobContext, meta: dict[str, Any]) -> None:
     result = truncate((result or "").strip(), MAX_TOOL_OUTPUT_CHARS)
     await scheduler.report_run(run_id, status, result)
     if status == "success":
-        # An instruction's result is the assistant's natural-language reply; a
-        # function_call's is raw tool output, so for those show just the description.
-        if etype == "instruction" and result:
+        # An instruction's result is the assistant's natural-language reply, worth
+        # showing; a pure batch's is raw tool output, so notify with just description.
+        if ran_instruction and result:
             message = f"{description}\n\n{result}"
         else:
             message = description

@@ -1,8 +1,9 @@
 """Request/response schemas for the REST API.
 
 The worker's scheduling tools speak this shape (see agent/agent.py), and the card renders the
-``TaskOut`` payload the tools return. ``ScheduleSpec`` and ``ExecutionSpec`` each carry a
-discriminating ``type`` with the fields required for that variant validated up front.
+``TaskOut`` payload the tools return. ``ScheduleSpec`` carries a discriminating ``type``;
+``ExecutionSpec`` holds a list of deterministic ``steps`` and/or a natural-language
+``instruction``.
 """
 
 from __future__ import annotations
@@ -30,20 +31,31 @@ class ScheduleSpec(BaseModel):
         return self
 
 
-class ExecutionSpec(BaseModel):
-    type: Literal["instruction", "function_call"]
-    # "instruction": natural-language instruction re-interpreted by the LLM at fire time.
-    text: Optional[str] = None
-    # "function_call": a tool name (agent or MCP) + args, replayed deterministically.
-    tool: Optional[str] = None
+class ToolCall(BaseModel):
+    """One deterministic tool call (agent or MCP tool + args) replayed at fire time."""
+
+    tool: str
     args: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExecutionSpec(BaseModel):
+    """What a task does, in one shape:
+
+    - ``steps``: an ordered list of concrete tool calls, replayed deterministically. They run
+      in order and stop at the first failure.
+    - ``instruction``: a natural-language instruction the LLM runs (via ``session.run``) after
+      the steps — seeing their results — to summarize and/or chain further tool calls.
+
+    At least one of the two must be present.
+    """
+
+    steps: list[ToolCall] = Field(default_factory=list)
+    instruction: Optional[str] = None
 
     @model_validator(mode="after")
     def _check(self) -> "ExecutionSpec":
-        if self.type == "instruction" and not self.text:
-            raise ValueError("text is required when execution.type is 'instruction'")
-        if self.type == "function_call" and not self.tool:
-            raise ValueError("tool is required when execution.type is 'function_call'")
+        if not self.steps and not (self.instruction and self.instruction.strip()):
+            raise ValueError("execution needs at least one step or an instruction")
         return self
 
 

@@ -9,7 +9,14 @@ from typing import Any, Literal
 import pandas as pd
 import yaml
 from livekit.agents import Agent, ModelSettings, mcp
-from livekit.agents.llm import ChatContext, ChatMessage, ToolContext, function_tool
+from livekit.agents.llm import (
+    ChatContext,
+    ChatMessage,
+    ToolContext,
+    ToolError,
+    function_tool,
+)
+from pydantic import BaseModel, Field
 
 import ha
 import scheduler_client as scheduler
@@ -17,6 +24,18 @@ from config import LIVE_CONTEXT_TOOL, settings
 from utils import current_time_text, to_aware_iso
 
 logger = logging.getLogger("ha-mcp-agent")
+
+
+class ToolCall(BaseModel):
+    """One deterministic tool call in a scheduled task: a tool name + its arguments."""
+
+    tool: str = Field(
+        description="Tool to call — one of your available tools, e.g. 'HassTurnOn'."
+    )
+    args: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Arguments for the tool, e.g. {'name': '主卧 空调'}.",
+    )
 
 
 def load_instructions() -> str:
@@ -136,10 +155,10 @@ class HomeAssistantAgent(Agent):
     @function_tool
     async def suggest_replies(self, replies: list[str]) -> None:
         """Offer up to ~3 one-tap quick replies for your last question, e.g. Yes / No.
-
         Call this when you ask a yes/no or short-choice question — especially when
         confirming a schedule. Tapping a chip sends that text as the user's reply, so
         phrase each option in the user's language as a natural reply.
+        This MUST be called only after the question is asked, not before.
         """
         logger.info("suggest_replies: %s", replies)
         if self._suggest_replies_cb:
@@ -155,68 +174,74 @@ class HomeAssistantAgent(Agent):
         self,
         description: str,
         schedule_type: Literal["once", "recurring"],
-        execution_type: Literal["instruction", "function_call"],
         run_at: str | None = None,
         cron: str | None = None,
+        steps: list[ToolCall] | None = None,
         instruction: str | None = None,
-        tool_name: str | None = None,
-        tool_args_json: str | None = None,
     ) -> str:
         """Schedule a task to run later, once or on a recurring schedule.
 
         ALWAYS confirm the resolved time and action with the user before calling this.
 
+        A task carries `steps` (concrete tool calls replayed exactly, in order) and/or
+        an `instruction` (natural language run at fire time). Provide at least one:
+
+        - Use `steps` for concrete, deterministic device actions you can pin down now.
+          Pass MULTIPLE steps when the request needs several actions — e.g. "turn on
+          the fan and set it to 50%" is two steps. Steps run in order and stop at the
+          first failure.
+        - Use `instruction` when the task needs judgement at run time or a natural
+          language answer (e.g. "tell me tomorrow's weather"). It runs after any steps,
+          sees their results, and may call more tools.
+        - Combine both to guarantee an action AND report on it.
+
         Args:
             description: Short summary, e.g. "Turn off the master bedroom AC".
             schedule_type: "once" or "recurring".
-            execution_type: "instruction" (you re-interpret it at run time) or
-                "function_call" (a specific tool is replayed exactly). Prefer
-                "function_call" for a concrete device action, "instruction" when
-                the action needs judgement at run time.
             run_at: For "once": absolute local time in ISO 8601, e.g.
                 "2026-07-22T17:30". Resolve relative times yourself.
             cron: For "recurring": a 5-field cron expression, e.g. "0 8 * * 1-5".
-            instruction: For "instruction": the natural-language instruction.
-            tool_name: For "function_call": one of your available tools.
-            tool_args_json: For "function_call": that tool's args as JSON.
+            steps: Ordered tool calls to replay at run time; each is a tool name + its
+                args, exactly as you would call it for an immediate action.
+            instruction: A natural-language instruction to run at fire time.
         """
         logger.info("schedule_task: %s [%s]", description, schedule_type)
+        if schedule_type == "once":
+            if not run_at:
+                raise ToolError("run_at is required for a one-time task.")
+            schedule = {
+                "type": "once",
+                "run_at": to_aware_iso(run_at, settings.agent_tz),
+                "timezone": settings.agent_tz,
+            }
+        elif schedule_type == "recurring":
+            if not cron:
+                raise ToolError("cron is required for a recurring task.")
+            schedule = {
+                "type": "recurring",
+                "cron": cron,
+                "timezone": settings.agent_tz,
+            }
+        else:
+            raise ToolError(f"unknown schedule_type {schedule_type!r}.")
+
+        steps = steps or []
+        ctx = await self.tool_context()  # validate each step's tool exists
+        for i, step in enumerate(steps, start=1):
+            if step.tool not in ctx.function_tools:
+                valid = ", ".join(sorted(ctx.function_tools))
+                raise ToolError(
+                    f"unknown tool {step.tool!r} in step {i}. Available: {valid}"
+                )
+        instruction_text = instruction.strip() if instruction else None
+        if not steps and not instruction_text:
+            raise ToolError("provide steps (tool calls) and/or an instruction.")
+        execution = {
+            "steps": [s.model_dump() for s in steps],
+            "instruction": instruction_text,
+        }
+
         try:
-            if schedule_type == "once":
-                if not run_at:
-                    return "Error: run_at is required for a one-time task."
-                schedule = {
-                    "type": "once",
-                    "run_at": to_aware_iso(run_at, settings.agent_tz),
-                    "timezone": settings.agent_tz,
-                }
-            elif schedule_type == "recurring":
-                if not cron:
-                    return "Error: cron is required for a recurring task."
-                schedule = {
-                    "type": "recurring",
-                    "cron": cron,
-                    "timezone": settings.agent_tz,
-                }
-            else:
-                return f"Error: unknown schedule_type {schedule_type!r}."
-
-            if execution_type == "instruction":
-                if not instruction:
-                    return "Error: instruction is required for an instruction task."
-                execution = {"type": "instruction", "text": instruction}
-            elif execution_type == "function_call":
-                if not tool_name:
-                    return "Error: tool_name is required for a function_call task."
-                ctx = await self.tool_context()
-                if tool_name not in ctx.function_tools:
-                    valid = ", ".join(sorted(ctx.function_tools))
-                    return f"Error: unknown tool {tool_name!r}. Available: {valid}"
-                args = json.loads(tool_args_json) if tool_args_json else {}
-                execution = {"type": "function_call", "tool": tool_name, "args": args}
-            else:
-                return f"Error: unknown execution_type {execution_type!r}."
-
             task = await scheduler.create_task(
                 {
                     "description": description,
@@ -224,11 +249,11 @@ class HomeAssistantAgent(Agent):
                     "execution": execution,
                 }
             )
-            logger.info("scheduled task %s", task.get("id"))
-            return json.dumps(task, ensure_ascii=False)
         except Exception as exc:  # noqa: BLE001 - surface a message for the LLM to relay
             logger.exception("schedule_task failed")
-            return f"Error scheduling task: {exc}"
+            raise ToolError(f"could not schedule task: {exc}") from exc
+        logger.info("scheduled task %s", task.get("id"))
+        return json.dumps(task, ensure_ascii=False)
 
     @function_tool
     async def list_scheduled_tasks(self) -> str:
@@ -236,10 +261,10 @@ class HomeAssistantAgent(Agent):
         logger.info("list_scheduled_tasks")
         try:
             tasks = await scheduler.list_tasks(active_only=True)
-            return json.dumps(tasks, ensure_ascii=False)
         except Exception as exc:  # noqa: BLE001
             logger.exception("list_scheduled_tasks failed")
-            return f"Error listing scheduled tasks: {exc}"
+            raise ToolError(f"could not list scheduled tasks: {exc}") from exc
+        return json.dumps(tasks, ensure_ascii=False)
 
     @function_tool
     async def cancel_scheduled_task(self, task_id: str) -> str:
@@ -248,10 +273,10 @@ class HomeAssistantAgent(Agent):
         logger.info("cancel_scheduled_task: %s", task_id)
         try:
             task = await scheduler.delete_task(task_id)
-            return json.dumps(task, ensure_ascii=False)
         except Exception as exc:  # noqa: BLE001
             logger.exception("cancel_scheduled_task failed")
-            return f"Error cancelling task: {exc}"
+            raise ToolError(f"could not cancel task: {exc}") from exc
+        return json.dumps(task, ensure_ascii=False)
 
     @function_tool
     async def update_scheduled_task(
@@ -284,12 +309,14 @@ class HomeAssistantAgent(Agent):
                     "timezone": settings.agent_tz,
                 }
             if not payload:
-                return "Error: nothing to update."
+                raise ToolError("nothing to update.")
             task = await scheduler.update_task(task_id, payload)
             return json.dumps(task, ensure_ascii=False)
+        except ToolError:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.exception("update_scheduled_task failed")
-            return f"Error updating task: {exc}"
+            raise ToolError(f"could not update task: {exc}") from exc
 
     async def get_home_state(self, force_update: bool = False) -> pd.DataFrame:
         if (

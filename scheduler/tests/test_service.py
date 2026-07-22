@@ -44,7 +44,7 @@ def test_create_once_task(tmp_path):
             description="turn off AC",
             schedule=ScheduleSpec(type="once", run_at=future_iso(hours=1), timezone="UTC"),
             execution=ExecutionSpec(
-                type="function_call", tool="HassTurnOff", args={"name": "AC"}
+                steps=[{"tool": "HassTurnOff", "args": {"name": "AC"}}]
             ),
         )
     )
@@ -55,6 +55,47 @@ def test_create_once_task(tmp_path):
     assert len(svc.list_tasks()) == 1
 
 
+def test_create_multi_step_task(tmp_path):
+    svc = make_service(tmp_path)
+    out = svc.create_task(
+        TaskCreate(
+            description="turn on the fan and set it to 50%",
+            schedule=ScheduleSpec(type="once", run_at=future_iso(hours=1), timezone="UTC"),
+            execution=ExecutionSpec(
+                steps=[
+                    {"tool": "HassTurnOn", "args": {"name": "fan"}},
+                    {"tool": "HassSetPosition", "args": {"name": "fan", "position": 50}},
+                ]
+            ),
+        )
+    )
+    stored = svc.get_task(out.id).execution
+    assert [s["tool"] for s in stored["steps"]] == ["HassTurnOn", "HassSetPosition"]
+    assert stored["instruction"] is None
+
+
+def test_create_steps_plus_instruction(tmp_path):
+    svc = make_service(tmp_path)
+    out = svc.create_task(
+        TaskCreate(
+            description="fetch weather then summarize",
+            schedule=ScheduleSpec(type="once", run_at=future_iso(hours=1), timezone="UTC"),
+            execution=ExecutionSpec(
+                steps=[{"tool": "GetWeather", "args": {}}],
+                instruction="tell me tomorrow's weather in one sentence",
+            ),
+        )
+    )
+    stored = svc.get_task(out.id).execution
+    assert len(stored["steps"]) == 1
+    assert stored["instruction"] == "tell me tomorrow's weather in one sentence"
+
+
+def test_execution_requires_steps_or_instruction():
+    with pytest.raises(ValueError):
+        ExecutionSpec()
+
+
 def test_reject_past_time(tmp_path):
     svc = make_service(tmp_path)
     with pytest.raises(ValueError):
@@ -62,7 +103,7 @@ def test_reject_past_time(tmp_path):
             TaskCreate(
                 description="past",
                 schedule=ScheduleSpec(type="once", run_at=future_iso(hours=-1), timezone="UTC"),
-                execution=ExecutionSpec(type="instruction", text="do it"),
+                execution=ExecutionSpec(instruction="do it"),
             )
         )
 
@@ -74,7 +115,7 @@ def test_reject_bad_cron(tmp_path):
             TaskCreate(
                 description="bad",
                 schedule=ScheduleSpec(type="recurring", cron="not a cron", timezone="UTC"),
-                execution=ExecutionSpec(type="instruction", text="do it"),
+                execution=ExecutionSpec(instruction="do it"),
             )
         )
 
@@ -87,7 +128,7 @@ async def test_recurring_task_next_run(tmp_path):
             TaskCreate(
                 description="every morning",
                 schedule=ScheduleSpec(type="recurring", cron="0 8 * * *", timezone="UTC"),
-                execution=ExecutionSpec(type="instruction", text="good morning"),
+                execution=ExecutionSpec(instruction="good morning"),
             )
         )
         assert out.schedule_type == "recurring"
@@ -102,7 +143,7 @@ def test_delete_task(tmp_path):
         TaskCreate(
             description="x",
             schedule=ScheduleSpec(type="once", run_at=future_iso(hours=1), timezone="UTC"),
-            execution=ExecutionSpec(type="instruction", text="x"),
+            execution=ExecutionSpec(instruction="x"),
         )
     )
     assert svc.delete_task(out.id) is not None
@@ -116,7 +157,7 @@ def test_update_reschedule(tmp_path):
         TaskCreate(
             description="x",
             schedule=ScheduleSpec(type="once", run_at=future_iso(hours=1), timezone="UTC"),
-            execution=ExecutionSpec(type="instruction", text="x"),
+            execution=ExecutionSpec(instruction="x"),
         )
     )
     new_at = future_iso(hours=3)
@@ -141,7 +182,7 @@ async def test_fire_dispatches_and_records(tmp_path, monkeypatch):
             description="fire me",
             schedule=ScheduleSpec(type="once", run_at=future_iso(hours=1), timezone="UTC"),
             execution=ExecutionSpec(
-                type="function_call", tool="HassTurnOff", args={"name": "AC"}
+                steps=[{"tool": "HassTurnOff", "args": {"name": "AC"}}]
             ),
         )
     )
@@ -169,7 +210,7 @@ def test_rehydrate_marks_missed(tmp_path):
                 run_at=(datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
                 cron=None,
                 timezone="UTC",
-                execution={"type": "instruction", "text": "x"},
+                execution={"steps": [], "instruction": "x"},
                 status="scheduled",
                 enabled=True,
                 created_at=service_module._utcnow_iso(),
