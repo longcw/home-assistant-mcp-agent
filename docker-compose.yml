@@ -6,6 +6,10 @@ services:
     restart: always
     # HA_URL, HA_TOKEN, LIVEKIT_* and LIVEKIT_INFERENCE_* — see .env.example
     env_file: .env
+    environment:
+      # The scheduler is reachable by service name on the shared network. The worker's
+      # scheduling tools call it, and the headless fire-time branch reports runs to it.
+      SCHEDULER_URL: http://scheduler:8080
     volumes:
       # System prompt is mounted (not baked in) so edits apply on the next conversation
       # with no image rebuild — edit agent/prompt.yaml, then `docker compose restart agent`
@@ -13,7 +17,33 @@ services:
       - ./agent/prompt.yaml:/app/prompt.yaml:ro
     networks:
       - home-assistant-network
+    depends_on:
+      - scheduler
+
+  scheduler:
+    build:
+      context: ./scheduler
+    container_name: home-assistant-mcp-scheduler
+    restart: always
+    # Needs LIVEKIT_* (to dispatch the worker at fire time), AGENT_NAME, AGENT_TZ, and
+    # (once exposed) SCHEDULER_TOKEN. Holds NO Home Assistant creds — all HA access is the worker's.
+    env_file: .env
+    environment:
+      SCHEDULER_DB: /data/scheduler.db
+    ports:
+      # Published (on an uncommon host port) so the Home Assistant integration (on another
+      # host) can reach the tasks API for the management tab. Container still listens on 8080,
+      # which is what the worker uses over the compose network. Protected by SCHEDULER_TOKEN.
+      - "8951:8080"
+    volumes:
+      # Persist the tasks DB across restarts.
+      - scheduler-data:/data
+    networks:
+      - home-assistant-network
 
 networks:
   home-assistant-network:
     driver: bridge
+
+volumes:
+  scheduler-data:
