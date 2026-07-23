@@ -162,6 +162,7 @@ async def run_scheduled_task(ctx: JobContext, meta: dict[str, Any]) -> None:
 
     result = truncate((result or "").strip(), MAX_TOOL_OUTPUT_CHARS)
     await scheduler.report_run(run_id, status, result)
+    targets = await scheduler.notify_targets()
     if status == "success":
         # An instruction's result is the assistant's natural-language reply, worth
         # showing; a pure batch's is raw tool output, so notify with just description.
@@ -169,10 +170,10 @@ async def run_scheduled_task(ctx: JobContext, meta: dict[str, Any]) -> None:
             message = f"{description}\n\n{result}"
         else:
             message = description
-        await ha.notify("Scheduled task done", message.strip())
+        await ha.notify(message.strip(), title="Scheduled task done", targets=targets)
     else:
         message = f"{description}\n\nError: {result}".strip()
-        await ha.notify("Scheduled task failed", message)
+        await ha.notify(message, title="Scheduled task failed", targets=targets)
 
     try:
         await ctx.delete_room()

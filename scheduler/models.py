@@ -41,6 +41,16 @@ class Task(Base):
     )
 
 
+class Settings(Base):
+    """Singleton (``id=1``) app settings shared by the card and the worker."""
+
+    __tablename__ = "settings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # notify.* services to also push notifications to, e.g. ["mobile_app_iphone"].
+    notify_targets: Mapped[list] = mapped_column(JSON, default=list)
+
+
 class Run(Base):
     __tablename__ = "runs"
 

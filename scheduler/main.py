@@ -15,7 +15,14 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 
 from config import load_config
 from db import make_engine, make_session_factory
-from schemas import RunReport, TaskCreate, TaskOut, TaskUpdate
+from schemas import (
+    RunReport,
+    SettingsOut,
+    SettingsUpdate,
+    TaskCreate,
+    TaskOut,
+    TaskUpdate,
+)
 from service import SchedulerService
 
 logging.basicConfig(level=logging.INFO)
@@ -100,3 +107,13 @@ def report_run(run_id: str, report: RunReport) -> dict:
     if not service.record_run(run_id, report.status, report.result):
         raise HTTPException(status_code=404, detail="run not found")
     return {"ok": True}
+
+
+@app.get("/settings", response_model=SettingsOut, dependencies=guard)
+def get_settings() -> SettingsOut:
+    return service.get_settings()
+
+
+@app.put("/settings", response_model=SettingsOut, dependencies=guard)
+def update_settings(req: SettingsUpdate) -> SettingsOut:
+    return service.update_settings(req)

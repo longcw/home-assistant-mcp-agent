@@ -165,6 +165,22 @@ class HomeAssistantAgent(Agent):
             self._suggest_replies_cb(replies)
         return None
 
+    @function_tool
+    async def send_notification(self, message: str, title: str | None = None) -> str:
+        """Send the user a notification (Home Assistant + their chosen devices).
+
+        Use to reach the user proactively, e.g. from a scheduled task. Write in the
+        user's language.
+
+        Args:
+            message: The notification body.
+            title: Optional short title.
+        """
+        logger.info("send_notification: %s", message)
+        targets = await scheduler.notify_targets()
+        ok = await ha.notify(message, title=title, targets=targets)
+        return "Notification sent." if ok else "Failed to send the notification."
+
     # --- Scheduling tools ---
     # These call the scheduler service. Their JSON results flow to the card over the
     # existing tool-execution feed (ha.tool_call), so the UI renders the task list.

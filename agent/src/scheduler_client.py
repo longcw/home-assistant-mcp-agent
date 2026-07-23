@@ -52,6 +52,20 @@ async def delete_task(task_id: str) -> Any:
     return await _request("DELETE", f"/tasks/{task_id}")
 
 
+async def notify_targets() -> list[str] | None:
+    """Best-effort: the configured notification channels, or None if unavailable.
+
+    None (not []) on failure so the caller falls back to a default channel rather than
+    sending nothing; an explicit [] means the user disabled every channel.
+    """
+    try:
+        data = await _request("GET", "/settings")
+    except Exception:
+        logger.exception("failed to fetch notify targets")
+        return None
+    return list((data or {}).get("notify_targets") or [])
+
+
 async def report_run(run_id: str, status: str, result: str) -> None:
     """Report a scheduled run's outcome back to the scheduler (best-effort)."""
     if not run_id:

@@ -22,8 +22,8 @@ from sqlalchemy.orm import sessionmaker
 
 import dispatch
 from config import Config
-from models import Run, Task
-from schemas import RunOut, TaskCreate, TaskOut, TaskUpdate
+from models import Run, Settings, Task
+from schemas import RunOut, SettingsOut, SettingsUpdate, TaskCreate, TaskOut, TaskUpdate
 
 logger = logging.getLogger("scheduler.service")
 
@@ -147,6 +147,27 @@ class SchedulerService:
             s.commit()
             return True
 
+    # --- settings ------------------------------------------------------------------
+
+    def get_settings(self) -> SettingsOut:
+        with self._Session() as s:
+            row = s.get(Settings, 1)
+            # No row yet → default to the in-HA persistent notification being enabled.
+            targets = list(row.notify_targets) if row else ["persistent_notification"]
+        return SettingsOut(notify_targets=targets)
+
+    def update_settings(self, req: SettingsUpdate) -> SettingsOut:
+        with self._Session() as s:
+            row = s.get(Settings, 1)
+            if row is None:
+                row = Settings(id=1, notify_targets=[])
+                s.add(row)
+            if req.notify_targets is not None:
+                row.notify_targets = req.notify_targets
+            s.commit()
+            s.refresh(row)
+            return SettingsOut(notify_targets=list(row.notify_targets))
+
     # --- firing --------------------------------------------------------------------
 
     async def _fire(self, task_id: str) -> None:
@@ -214,6 +235,8 @@ class SchedulerService:
         tz = ZoneInfo(task.timezone)
         if task.schedule_type == "recurring":
             return CronTrigger.from_crontab(task.cron, timezone=tz)
+        if task.run_at is None:
+            raise ValueError(f"once task {task.id} has no run_at")
         dt = datetime.fromisoformat(task.run_at)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=tz)

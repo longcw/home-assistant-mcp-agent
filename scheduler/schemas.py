@@ -100,3 +100,13 @@ class RunReport(BaseModel):
 
     status: Literal["success", "error"]
     result: Optional[str] = None
+
+
+class SettingsOut(BaseModel):
+    # notify.* services notifications are also pushed to (besides the always-on
+    # persistent_notification), e.g. ["mobile_app_iphone"].
+    notify_targets: list[str] = Field(default_factory=list)
+
+
+class SettingsUpdate(BaseModel):
+    notify_targets: Optional[list[str]] = None
