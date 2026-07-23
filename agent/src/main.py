@@ -144,6 +144,7 @@ async def run_scheduled_task(ctx: JobContext, meta: dict[str, Any]) -> None:
     status = "success"
     result = ""
     ran_instruction = False
+    steps: list[ToolCall] = []
     try:
         steps = [ToolCall.model_validate(s) for s in (execution.get("steps") or [])]
         step_results = await _run_steps(agent, steps)
@@ -162,18 +163,23 @@ async def run_scheduled_task(ctx: JobContext, meta: dict[str, Any]) -> None:
 
     result = truncate((result or "").strip(), MAX_TOOL_OUTPUT_CHARS)
     await scheduler.report_run(run_id, status, result)
-    targets = await scheduler.notify_targets()
-    if status == "success":
+
+    # A task whose steps already notify the user (e.g. a reminder, built on
+    # send_notification) shouldn't also get a "task done" notification on top.
+    self_notified = any(s.tool == "send_notification" for s in steps)
+    if status == "error":
+        targets = await scheduler.notify_targets()
+        message = f"{description}\n\nError: {result}".strip()
+        await ha.notify(message, title="Scheduled task failed", targets=targets)
+    elif not self_notified:
         # An instruction's result is the assistant's natural-language reply, worth
         # showing; a pure batch's is raw tool output, so notify with just description.
         if ran_instruction and result:
             message = f"{description}\n\n{result}"
         else:
             message = description
+        targets = await scheduler.notify_targets()
         await ha.notify(message.strip(), title="Scheduled task done", targets=targets)
-    else:
-        message = f"{description}\n\nError: {result}".strip()
-        await ha.notify(message, title="Scheduled task failed", targets=targets)
 
     try:
         await ctx.delete_room()
