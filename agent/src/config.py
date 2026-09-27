@@ -56,11 +56,13 @@ class Settings:
     text_renew_after: float
     # Chat items a loaded text conversation keeps; older ones are dropped.
     text_max_items: int
-    # notify service of the phone showing text turns as Live Activities; empty = off.
+    # notify service of the phone that shows each text turn's progress; empty = off.
     text_live_activity: str
-    # Page the Live Activity opens in the HA app when tapped, e.g. a dashboard view.
+    # "notification" (one tagged notification, replaced in place) or "activity".
+    text_live_mode: str
+    # Page the phone opens in the HA app when the progress is tapped, e.g. the Text tab.
     text_live_url: str
-    # Seconds after the last text turn before its Live Activity is cleared.
+    # Seconds after the last text turn before a Live Activity is cleared.
     text_live_clear_after: float
     # Upper bound on one text reply, kept under the reverse proxy's 90 s read timeout.
     text_reply_timeout: float
@@ -90,6 +92,7 @@ def load_settings() -> Settings:
         text_renew_after=float(os.getenv("TEXT_RENEW_AFTER", str(8 * 3600))),
         text_max_items=int(os.getenv("TEXT_MAX_ITEMS", "100")),
         text_live_activity=os.getenv("TEXT_LIVE_ACTIVITY", ""),
+        text_live_mode=os.getenv("TEXT_LIVE_MODE", "notification"),
         text_live_url=os.getenv("TEXT_LIVE_URL", ""),
         text_live_clear_after=float(os.getenv("TEXT_LIVE_CLEAR_AFTER", "900")),
         text_reply_timeout=float(os.getenv("TEXT_REPLY_TIMEOUT", "80")),
