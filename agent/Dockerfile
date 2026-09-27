@@ -4,6 +4,10 @@ FROM python:${PYTHON_VERSION}-slim
 # uv for fast, reproducible installs
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
+# git, for the dependencies pyproject.toml pins to commits
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 ENV UV_COMPILE_BYTECODE=1 \

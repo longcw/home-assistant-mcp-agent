@@ -3,9 +3,10 @@ name = "home-assistant-mcp-agent"
 version = "0.1.0"
 description = "LiveKit voice agent that controls Home Assistant via its native MCP server"
 readme = "../README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "livekit-agents[mcp]>=1.6",
+    "livekit-agents[mcp,a2a]>=1.6",
+    "livekit-protocol>=1.1.27",
     "python-dotenv>=1.0",
     "pandas>=2.0",
     "PyYAML>=6.0",
@@ -21,3 +22,10 @@ dev = [
 
 [tool.uv]
 package = false
+
+# Text chat runs on the draft session-persistence API (livekit/agents#7465), which needs
+# livekit-protocol's agent-db module from python-sdks main (livekit/python-sdks#831).
+# Both are pinned to commits; docs/text-endpoint.md says how to move them.
+[tool.uv.sources]
+livekit-agents = { git = "https://github.com/livekit/agents.git", rev = "c89c3055dee0a894010c2cab693e7d3f8acb5664", subdirectory = "livekit-agents" }
+livekit-protocol = { git = "https://github.com/livekit/python-sdks.git", rev = "082e83c44dea983cca8aec21c948f84aa040d97c", subdirectory = "livekit-protocol" }

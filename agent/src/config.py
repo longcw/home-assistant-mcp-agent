@@ -44,6 +44,16 @@ class Settings:
     # Home Assistant base URL and long-lived token.
     ha_url: str
     ha_token: str
+    # Port of the agent server's HTTP app, which serves the text chat endpoints.
+    http_port: int
+    # Bearer token for the text chat endpoints; empty leaves them unmounted.
+    text_api_token: str
+    # Directory holding the persisted text conversations and the current one's id.
+    text_data_dir: str
+    # Seconds a quiet text conversation stays loaded before it is saved and dropped.
+    text_idle_timeout: float
+    # Upper bound on one text reply, kept under the reverse proxy's 90 s read timeout.
+    text_reply_timeout: float
 
 
 def load_settings() -> Settings:
@@ -63,6 +73,11 @@ def load_settings() -> Settings:
         agent_tz=os.getenv("AGENT_TZ") or os.getenv("TZ") or "UTC",
         ha_url=os.getenv("HA_URL", ""),
         ha_token=os.getenv("HA_TOKEN", ""),
+        http_port=int(os.getenv("HTTP_PORT", "8081")),
+        text_api_token=os.getenv("TEXT_API_TOKEN", ""),
+        text_data_dir=os.getenv("TEXT_DATA_DIR", "/data"),
+        text_idle_timeout=float(os.getenv("TEXT_IDLE_TIMEOUT", "300")),
+        text_reply_timeout=float(os.getenv("TEXT_REPLY_TIMEOUT", "80")),
     )
 
 

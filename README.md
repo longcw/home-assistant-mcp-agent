@@ -99,6 +99,10 @@ The worker broadcasts its live STT + audio-output state on the `ha.speech_state`
 so the card can mirror it (e.g. a "sleeping" indicator when STT is torn down), and the
 tool-execution lifecycle on `ha.tool_call`.
 
+## Text chat over HTTP
+
+`POST /chat` on port 8952 takes one line of text and answers in plain text, in one conversation that persists across restarts until renewed — made for an iPhone Shortcut. It runs on a draft livekit-agents API; see [docs/text-endpoint.md](docs/text-endpoint.md) for usage, how it works, and how to upgrade it.
+
 ## Frontend / dashboard UI
 
 Use the companion Home Assistant integration:

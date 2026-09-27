@@ -15,6 +15,14 @@ services:
       # with no image rebuild — edit agent/prompt.yaml, then `docker compose restart agent`
       # (or just start a new conversation, since it's re-read per session).
       - ./agent/prompt.yaml:/app/prompt.yaml:ro
+      # Persisted text conversations (one SQLite file each) and the current one's id.
+      - ./agent-data:/data
+    ports:
+      # The agent server's HTTP app: the text chat bridge at /chat and its A2A endpoint at
+      # /home-assistant, both behind TEXT_API_TOKEN (off when that is unset).
+      - "8952:8081"
+    # A graceful stop closes the loaded text conversations, which is when they save.
+    stop_grace_period: 30s
     networks:
       - home-assistant-network
     depends_on:

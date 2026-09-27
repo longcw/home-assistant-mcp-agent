@@ -19,6 +19,7 @@ from livekit.agents.llm.utils import execute_function_call
 
 import ha
 import scheduler_client as scheduler
+import text_chat
 from agent import HomeAssistantAgent, ToolCall
 from config import (
     MAX_TOOL_OUTPUT_CHARS,
@@ -187,7 +188,9 @@ async def run_scheduled_task(ctx: JobContext, meta: dict[str, Any]) -> None:
         logger.exception("failed to delete room after scheduled task")
 
 
-server = AgentServer()
+# the store persists text conversations only; voice sessions do not pass persist=
+server = AgentServer(port=settings.http_port, store=text_chat.store)
+text_chat.mount(server)
 
 
 def _forward_tool_events(ctx: JobContext, session: AgentSession) -> None:
