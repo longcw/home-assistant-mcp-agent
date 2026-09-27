@@ -252,7 +252,9 @@ class _PhoneProgress:
 
     def finish(self, answer: str, *, ok: bool) -> None:
         icon = "mdi:check-circle" if ok else "mdi:alert-circle"
-        self._put([answer or "Done."], icon, final=True)
+        # the answer keeps the turn's tool calls above it, as the text reply does
+        done = [f"✓ {s}" for s in self._steps[-5:]]
+        self._put([*done, answer or "Done."], icon, final=True)
         if self._activity:
             self._clear = asyncio.create_task(self._clear_later())
 
