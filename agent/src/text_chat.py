@@ -195,9 +195,10 @@ class _PhoneProgress:
     """A text turn's progress on the phone, replaced in place as the turn moves.
 
     Every push carries one ``tag``, and each replaces the last. In ``notification`` mode
-    (the default) that is an ordinary notification with the question as its title; iOS
-    alerts once per tag, so each update clears the last and posts anew, steps without
-    sound and the answer with it. In ``activity`` mode it is a Live
+    (the default) that is an ordinary notification titled with the question: it pops
+    with sound when the turn starts, gathers each tool call silently, since iOS alerts
+    once per tag, and is cleared and posted anew so the answer pops with sound too. In
+    ``activity`` mode it is a Live
     Activity, whose title iOS fixes at start and whose push-to-start fails while the
     Companion app is closed (home-assistant/iOS#5766); it clears TEXT_LIVE_CLEAR_AFTER
     seconds after the last turn, since iOS rations how many an app may start.
@@ -222,7 +223,7 @@ class _PhoneProgress:
             self._clear.cancel()
         self._question = question if len(question) <= 60 else f"{question[:59]}…"
         self._steps = []
-        self._put(["…"], "mdi:robot")
+        self._put(["…"], "mdi:robot", pop=True)
 
     def step(self, tool: str, args: object) -> None:
         values = args.values() if isinstance(args, dict) else [args] if args else []
@@ -230,7 +231,10 @@ class _PhoneProgress:
             "/".join(map(str, v)) if isinstance(v, list) else str(v) for v in values
         ]
         self._steps.append(" · ".join([tool, *shown])[:80])
-        done = [f"✓ {s}" for s in self._steps[-3:-1]]
+        if self._activity:
+            lines = [*(f"✓ {s}" for s in self._steps[-3:-1]), f"… {self._steps[-1]}"]
+        else:
+            lines = [f"→ {s}" for s in self._steps]
         if tool.startswith("HassTurnOff"):
             icon = "mdi:power-off"
         elif tool.startswith(("HassTurnOn", "HassToggle")):
@@ -243,20 +247,24 @@ class _PhoneProgress:
             icon = "mdi:bell-ring"
         else:
             icon = "mdi:magnify"
-        self._put([*done, f"… {self._steps[-1]}"], icon)
+        self._put(lines, icon)
 
     def report(self, text: str) -> None:
-        if text:
-            done = [f"✓ {s}" for s in self._steps[-2:]]
-            self._put([*done, f"… {text}"], "mdi:progress-clock")
+        if not text:
+            return
+        if self._activity:
+            lines = [*(f"✓ {s}" for s in self._steps[-2:]), f"… {text}"]
+        else:
+            lines = [*(f"→ {s}" for s in self._steps), f"  … {text}"]
+        self._put(lines, "mdi:progress-clock")
 
     def finish(self, answer: str, *, ok: bool) -> None:
         icon = "mdi:check-circle" if ok else "mdi:alert-circle"
-        self._put([answer or "Done."], icon, final=True)
+        self._put([answer or "Done."], icon, pop=True)
         if self._activity:
             self._clear = asyncio.create_task(self._clear_later())
 
-    def _put(self, lines: list[str], icon: str, *, final: bool = False) -> None:
+    def _put(self, lines: list[str], icon: str, *, pop: bool = False) -> None:
         data: dict[str, object] = {"tag": self.TAG}
         if settings.text_live_url:
             data["url"] = settings.text_live_url
@@ -267,11 +275,11 @@ class _PhoneProgress:
             data |= {"live_update": True, "notification_icon": icon, "silent": True}
         else:
             title = self._question
-            data["push"] = {"interruption-level": "active"} | (
-                {} if final else {"sound": "none"}
-            )
-            # a replacement under one tag updates silently, so clear it to pop again
-            self._outbox.put_nowait(("clear_notification", "", {"tag": self.TAG}))
+            if pop:
+                # a replacement under one tag updates silently, so clear it to pop again
+                self._outbox.put_nowait(("clear_notification", "", {"tag": self.TAG}))
+            else:
+                data["push"] = {"sound": "none"}
         self._outbox.put_nowait(("\n".join(lines), title, data))
         if self._sender is None or self._sender.done():
             self._sender = asyncio.create_task(self._send_all())
