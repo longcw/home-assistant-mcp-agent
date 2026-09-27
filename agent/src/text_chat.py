@@ -195,8 +195,9 @@ class _PhoneProgress:
     """A text turn's progress on the phone, replaced in place as the turn moves.
 
     Every push carries one ``tag``, and each replaces the last. In ``notification`` mode
-    (the default) that is an ordinary notification: the question as its title, quiet
-    step updates, and an alert for the answer. In ``activity`` mode it is a Live
+    (the default) that is an ordinary notification with the question as its title; iOS
+    alerts once per tag, so each update clears the last and posts anew, steps without
+    sound and the answer with it. In ``activity`` mode it is a Live
     Activity, whose title iOS fixes at start and whose push-to-start fails while the
     Companion app is closed (home-assistant/iOS#5766); it clears TEXT_LIVE_CLEAR_AFTER
     seconds after the last turn, since iOS rations how many an app may start.
@@ -265,10 +266,12 @@ class _PhoneProgress:
             title = self.ACTIVITY_TITLE
             data |= {"live_update": True, "notification_icon": icon, "silent": True}
         else:
-            # steps update quietly; the answer alerts, since that is what is awaited
             title = self._question
-            level = "active" if final else "passive"
-            data["push"] = {"interruption-level": level}
+            data["push"] = {"interruption-level": "active"} | (
+                {} if final else {"sound": "none"}
+            )
+            # a replacement under one tag updates silently, so clear it to pop again
+            self._outbox.put_nowait(("clear_notification", "", {"tag": self.TAG}))
         self._outbox.put_nowait(("\n".join(lines), title, data))
         if self._sender is None or self._sender.done():
             self._sender = asyncio.create_task(self._send_all())
