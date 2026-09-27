@@ -5,8 +5,10 @@ Run on a Mac (signing uses the `shortcuts` CLI):
     uv run --no-project python scripts/make_shortcut.py -o "Ask Home.shortcut" \\
         [--url URL] [--token TOKEN]
 
-The URL and token are asked for on import, prefilled with what is given here. Each run
-asks one question, sends it, and shows the reply with the tool calls it made.
+The URL and token are asked for on import, prefilled with what is given here. The text
+to send is the shortcut's input: another shortcut passes it with Run Shortcut (after
+Dictate Text, say) and gets the reply back as output; run on its own, it asks for text
+and shows the reply.
 """
 
 import argparse
@@ -17,19 +19,21 @@ import uuid
 from pathlib import Path
 
 OBJ = "￼"  # where a variable sits inside a Shortcuts text field
+SHORTCUT_INPUT = {"Type": "ExtensionInput"}
 
 
-def text(value: str, *variables: tuple[str, str]) -> dict:
-    """A text field: `value`, with each OBJ in it filled by a (uuid, output name)."""
-    attachments = {}
-    for (output_uuid, name), pos in zip(
-        variables, [i for i, c in enumerate(value) if c == OBJ], strict=True
-    ):
-        attachments[f"{{{pos}, 1}}"] = {
-            "OutputUUID": output_uuid,
-            "OutputName": name,
-            "Type": "ActionOutput",
-        }
+def output(action_uuid: str, name: str) -> dict:
+    """The variable holding an earlier action's output."""
+    return {"OutputUUID": action_uuid, "OutputName": name, "Type": "ActionOutput"}
+
+
+def text(value: str, *variables: dict) -> dict:
+    """A text field: `value`, with each OBJ in it filled by the next variable."""
+    positions = [i for i, c in enumerate(value) if c == OBJ]
+    attachments = {
+        f"{{{pos}, 1}}": variable
+        for pos, variable in zip(positions, variables, strict=True)
+    }
     return {
         "Value": {"string": value, "attachmentsByRange": attachments},
         "WFSerializationType": "WFTextTokenString",
@@ -49,7 +53,7 @@ def dictionary(items: dict[str, dict]) -> dict:
 
 
 def build(url: str, token: str) -> dict:
-    url_id, token_id, ask_id, get_id = (str(uuid.uuid4()).upper() for _ in range(4))
+    url_id, token_id, get_id = (str(uuid.uuid4()).upper() for _ in range(3))
     actions = [
         {
             "WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
@@ -60,33 +64,25 @@ def build(url: str, token: str) -> dict:
             "WFWorkflowActionParameters": {"UUID": token_id, "WFTextActionText": token},
         },
         {
-            "WFWorkflowActionIdentifier": "is.workflow.actions.ask",
-            "WFWorkflowActionParameters": {
-                "UUID": ask_id,
-                "WFAskActionPrompt": "Ask Home Assistant",
-                "WFInputType": "Text",
-            },
-        },
-        {
             "WFWorkflowActionIdentifier": "is.workflow.actions.downloadurl",
             "WFWorkflowActionParameters": {
                 "UUID": get_id,
-                "WFURL": text(OBJ, (url_id, "Text")),
+                "WFURL": text(OBJ, output(url_id, "Text")),
                 "WFHTTPMethod": "POST",
                 "ShowHeaders": True,
                 "WFHTTPHeaders": dictionary(
-                    {"Authorization": text(f"Bearer {OBJ}", (token_id, "Text"))}
+                    {"Authorization": text(f"Bearer {OBJ}", output(token_id, "Text"))}
                 ),
                 "WFHTTPBodyType": "JSON",
-                "WFJSONValues": dictionary(
-                    {"text": text(OBJ, (ask_id, "Provided Input"))}
-                ),
+                "WFJSONValues": dictionary({"text": text(OBJ, SHORTCUT_INPUT)}),
             },
         },
         {
-            "WFWorkflowActionIdentifier": "is.workflow.actions.showresult",
+            # hands the reply to a calling shortcut, and shows it when there is none
+            "WFWorkflowActionIdentifier": "is.workflow.actions.output",
             "WFWorkflowActionParameters": {
-                "Text": text(OBJ, (get_id, "Contents of URL"))
+                "WFOutput": text(OBJ, output(get_id, "Contents of URL")),
+                "WFNoOutputSurfaceBehavior": "Respond",
             },
         },
     ]
@@ -114,9 +110,15 @@ def build(url: str, token: str) -> dict:
                 "Text": "TEXT_API_TOKEN from the server's .env",
             },
         ],
-        "WFWorkflowInputContentItemClasses": [],
+        "WFWorkflowInputContentItemClasses": ["WFStringContentItem"],
+        "WFWorkflowNoInputBehavior": {
+            "Name": "WFWorkflowNoInputBehaviorAskForInput",
+            "Parameters": {"ItemClass": "WFStringContentItem"},
+        },
+        "WFWorkflowOutputContentItemClasses": ["WFStringContentItem"],
+        "WFWorkflowHasOutputFallback": True,
         "WFWorkflowTypes": [],
-        "WFWorkflowHasShortcutInputVariables": False,
+        "WFWorkflowHasShortcutInputVariables": True,
     }
 
 

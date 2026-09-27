@@ -29,7 +29,7 @@ curl -X POST http://192.168.100.121:8952/chat \
 uv run --no-project python scripts/make_shortcut.py -o "Ask Home.shortcut" --token "$TEXT_API_TOKEN"
 ```
 
-AirDrop the file to the iPhone, or open it on a Mac signed in to the same iCloud account, and import it. The import asks for the URL and the token, prefilled with `--url` (default `http://192.168.100.121:8952/chat`, reachable at home or over Tailscale) and `--token`. Without `--token` the file holds no secret and can be shared. Each run is *Ask for Input*, POST `/chat`, *Show Result*: one question, and its reply with the tool calls it made.
+AirDrop the file to the iPhone, or open it on a Mac signed in to the same iCloud account, and import it. The import asks for the URL and the token, prefilled with `--url` (default `http://192.168.100.121:8952/chat`, reachable at home or over Tailscale) and `--token`. Without `--token` the file holds no secret and can be shared. The text it sends is its Shortcut Input, and the reply (tool calls, then the answer) is its output. From another shortcut: *Dictate Text* → *Run Shortcut* "Ask Home" with the dictated text as input → *Show Result* on its output. Run on its own, it asks for the text and shows the reply.
 
 ## How it works
 
