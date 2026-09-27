@@ -20,6 +20,7 @@ from livekit.agents import AgentServer, AgentSession, inference
 from livekit.agents.a2a import A2AClient, A2ASessionContext, TaskInput
 from livekit.agents.store import LocalStore
 
+import ha
 from agent import HomeAssistantAgent
 from config import settings
 
@@ -83,41 +84,129 @@ class _Conversation:
             client, conversation_id, started = await self._open(renew)
             if not text:
                 return conversation_id, "Started a new conversation."
+            live = _LiveActivity.start(text) if settings.text_live_activity else None
             lines = ["(new conversation)"] if steps and started else []
             said: list[str] = []
-            answer = ""
+            answer, ok = "", True
             task_input = TaskInput(text=text, conversation_id=conversation_id)
             async with client.send(task_input) as stream:
                 try:
                     async with asyncio.timeout(settings.text_reply_timeout):
                         async for update in stream:
                             item = update.item
-                            if item is not None and item.type == "function_call":
+                            if item is None or item.type != "function_call":
+                                if update.text:
+                                    said.append(update.text)
+                            elif item.update_of:
                                 # a tool's progress report is a call naming the call it
                                 # reports on, with the report as the update's text
-                                if steps and item.update_of:
-                                    lines.append(f"  … {update.text}")
-                                elif steps:
-                                    try:
-                                        args = json.loads(item.arguments or "{}")
-                                    except ValueError:
-                                        args = item.arguments
-                                    args = json.dumps(args, ensure_ascii=False)
-                                    args = args.removeprefix("{}")
-                                    lines.append(f"→ {item.name}({args[:120]})")
-                            elif update.text:
-                                said.append(update.text)
+                                lines.append(f"  … {update.text}")
+                                if live:
+                                    live.report(update.text)
+                            else:
+                                try:
+                                    args = json.loads(item.arguments or "{}")
+                                except ValueError:
+                                    args = item.arguments
+                                shown = json.dumps(args, ensure_ascii=False)
+                                shown = shown.removeprefix("{}")[:120]
+                                lines.append(f"→ {item.name}({shown})")
+                                if live:
+                                    live.step(item.name, args)
                             if update.state != "working":
                                 answer = update.text or (said[-1] if said else "")
                                 if update.state in ("failed", "canceled"):
-                                    answer = f"[{update.state}] {answer}"
+                                    answer, ok = f"[{update.state}] {answer}", False
                                 break
                 except TimeoutError:
                     await stream.cancel("the text client stopped waiting")
                     answer = "\n".join(["[timeout] still working", *said])
-            if lines:
+                    ok = False
+            if live:
+                live.finish(answer, ok=ok)
+            if not steps:
+                lines = []
+            elif lines:
                 lines.append("")
             return conversation_id, "\n".join([*lines, answer])
+
+
+class _LiveActivity:
+    """One turn's progress as a Live Activity on the phone, updated in place.
+
+    Built on the HA companion app: a notification with ``live_update`` and a ``tag``
+    starts it, and each later one with that tag replaces it.
+    """
+
+    _last: _LiveActivity | None = None
+    _clearing: asyncio.Task[None] | None = None
+
+    def __init__(self, question: str) -> None:
+        self._title = question[:60]
+        self._tag = f"ha-text-{time.time_ns()}"
+        self._steps: list[str] = []
+        self._outbox: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
+        self._sender = asyncio.create_task(self._send_all())
+
+    @classmethod
+    def start(cls, question: str) -> _LiveActivity:
+        """Open an activity for this question, clearing the previous one."""
+        if (last := cls._last) is not None and not last._sender.done():
+            last._sender.cancel()
+            # held on the class so the task is not collected before it runs
+            cls._clearing = asyncio.create_task(
+                last._push("clear_notification", "", live=False)
+            )
+        cls._last = activity = cls(question)
+        activity._outbox.put_nowait(("…", "mdi:robot"))
+        return activity
+
+    def step(self, tool: str, args: object) -> None:
+        values = args.values() if isinstance(args, dict) else [args] if args else []
+        shown = [
+            "/".join(map(str, v)) if isinstance(v, list) else str(v) for v in values
+        ]
+        self._steps.append(" · ".join([tool, *shown])[:80])
+        done = [f"✓ {s}" for s in self._steps[-3:-1]]
+        message = "\n".join([*done, f"… {self._steps[-1]}"])
+        if tool.startswith(("HassTurnOff",)):
+            icon = "mdi:power-off"
+        elif tool.startswith(("HassTurnOn", "HassToggle")):
+            icon = "mdi:power"
+        elif tool.startswith(("HassLight", "set_")) or "Set" in tool:
+            icon = "mdi:tune-variant"
+        elif "schedule" in tool:
+            icon = "mdi:calendar-clock"
+        elif tool == "send_notification":
+            icon = "mdi:bell-ring"
+        else:
+            icon = "mdi:magnify"
+        self._outbox.put_nowait((message, icon))
+
+    def report(self, text: str) -> None:
+        if text:
+            done = [f"✓ {s}" for s in self._steps[-2:]]
+            self._outbox.put_nowait(
+                ("\n".join([*done, f"… {text}"]), "mdi:progress-clock")
+            )
+
+    def finish(self, answer: str, *, ok: bool) -> None:
+        icon = "mdi:check-circle" if ok else "mdi:alert-circle"
+        self._outbox.put_nowait((answer[:250] or "Done.", icon))
+        self._outbox.put_nowait(None)
+
+    async def _push(self, message: str, icon: str, *, live: bool = True) -> None:
+        data: dict[str, object] = {"tag": self._tag}
+        if live:
+            data |= {"live_update": True, "notification_icon": icon, "silent": True}
+        await ha.push(settings.text_live_activity, message, data, title=self._title)
+
+    async def _send_all(self) -> None:
+        # one sender per activity, so its updates reach the phone in order
+        while (update := await self._outbox.get()) is not None:
+            await self._push(*update)
+        await asyncio.sleep(settings.text_live_clear_after)
+        await self._push("clear_notification", "", live=False)
 
 
 def mount(server: AgentServer) -> None:

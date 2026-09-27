@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any
 
 import httpx
 from livekit.agents import mcp
@@ -31,7 +32,7 @@ def text_result_resolver(ctx: mcp.MCPToolResultContext) -> str:
     return json.dumps([item.model_dump() for item in ctx.result.content])
 
 
-async def _post_service(path: str, payload: dict[str, str]) -> bool:
+async def _post_service(path: str, payload: dict[str, Any]) -> bool:
     """POST to an HA service (``/api/services/<path>``). Returns True on success."""
     try:
         base = settings.ha_url.rstrip("/")
@@ -78,3 +79,13 @@ async def notify(
             sent = await _post_service(f"notify/{service}", payload)
         ok = ok or sent
     return ok
+
+
+async def push(
+    service: str, message: str, data: dict[str, Any], title: str = ""
+) -> bool:
+    """Send to one ``notify.<service>`` with a companion-app ``data`` payload."""
+    payload: dict[str, Any] = {"message": message, "data": data}
+    if title:
+        payload["title"] = title
+    return await _post_service(f"notify/{service.removeprefix('notify.')}", payload)

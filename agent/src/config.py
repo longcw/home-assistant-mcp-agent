@@ -56,6 +56,10 @@ class Settings:
     text_renew_after: float
     # Chat items a loaded text conversation keeps; older ones are dropped.
     text_max_items: int
+    # notify service of the phone showing text turns as Live Activities; empty = off.
+    text_live_activity: str
+    # Seconds the finished turn's Live Activity stays before it is cleared.
+    text_live_clear_after: float
     # Upper bound on one text reply, kept under the reverse proxy's 90 s read timeout.
     text_reply_timeout: float
 
@@ -83,6 +87,8 @@ def load_settings() -> Settings:
         text_idle_timeout=float(os.getenv("TEXT_IDLE_TIMEOUT", "300")),
         text_renew_after=float(os.getenv("TEXT_RENEW_AFTER", str(8 * 3600))),
         text_max_items=int(os.getenv("TEXT_MAX_ITEMS", "100")),
+        text_live_activity=os.getenv("TEXT_LIVE_ACTIVITY", ""),
+        text_live_clear_after=float(os.getenv("TEXT_LIVE_CLEAR_AFTER", "60")),
         text_reply_timeout=float(os.getenv("TEXT_REPLY_TIMEOUT", "80")),
     )
 

@@ -15,11 +15,17 @@ curl -X POST http://192.168.100.121:8952/chat \
 
 - The body is either JSON `{"text": "...", "new": false, "steps": true}` or plain text. `?new=1` and `?steps=0` work too.
 - The reply is plain text: one line per tool call the turn made (`→ HassTurnOn({"name": "客厅 灯"})`, plus `  … ` lines for a tool's progress reports), a blank line, then the agent's answer. `"steps": false` returns the answer alone, which suits *Speak Text*. A turn that started a new conversation begins with `(new conversation)`. The `X-Conversation-Id` header names the conversation.
-- The reply comes back whole, not streamed: an iPhone Shortcut's *Get Contents of URL* waits for the full body, so streamed output would show no sooner there. The step lines are how a turn's work is shown.
+- The reply comes back whole, not streamed: an iPhone Shortcut's *Get Contents of URL* waits for the full body, so streamed output would show no sooner there. The step lines are how a turn's work is shown, and the Live Activity below is how it is shown while it runs.
 - Requests go into one conversation, so the agent remembers earlier turns, across restarts too. The next request after `TEXT_RENEW_AFTER` (8 h) without one starts a new conversation on its own, so an evening's chat is not the next morning's. `"new": true` starts one now; with no `text` it only does that.
 - A loaded conversation keeps only its latest `TEXT_MAX_ITEMS` (100) chat items in the agent's context, cut with `ChatContext.truncate()` each time it loads. The session's own history, which the model never reads, is not cut, and a renewal bounds it anyway.
 - A reply is capped at `TEXT_REPLY_TIMEOUT` (80 s), under the reverse proxy's 90 s read timeout. A turn that runs out is cancelled and returns whatever the agent had said so far.
 - Both endpoints need `TEXT_API_TOKEN` as a bearer token; with it unset, neither is mounted.
+
+### Live Activity
+
+With `TEXT_LIVE_ACTIVITY` set to a phone's notify service (`mobile_app_long_s_iphone_air`), each turn also shows on that phone's lock screen and Dynamic Island as it runs, with no unlock needed. The title is the question; the message shows the last three steps (`✓` done, `…` the one running) with arguments as plain values, and the icon follows the tool (power for on/off, a magnifier for queries, and so on). The answer replaces it at the end, with a check or an alert icon, and it clears `TEXT_LIVE_CLEAR_AFTER` (60) seconds later, or as soon as the next turn starts.
+
+It is the HA Companion app's Live Activity: a notification with `live_update: true` and a `tag`, where each later one with the same tag replaces it ([docs](https://companion.home-assistant.io/docs/notifications/live-activities/)). It needs HA Core 2026.7+, Companion app 2026.9+ and iOS 17.2+. Updates are sent `silent`, and iOS may batch those when the phone is away from home; on the home Wi-Fi they go by local push, which iOS does not throttle.
 
 ### iPhone Shortcut
 
