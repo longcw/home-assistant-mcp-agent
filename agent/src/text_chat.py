@@ -8,6 +8,7 @@ pyproject.toml; docs/text-endpoint.md has the checklist.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hmac
 import json
 import logging
@@ -15,10 +16,10 @@ import time
 from pathlib import Path
 
 from fastapi import Request
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from livekit.agents import AgentServer, AgentSession, inference
 from livekit.agents.a2a import A2AClient, A2ASessionContext, TaskInput
-from livekit.agents.store import LocalStore
+from livekit.agents.store import LocalStore, StoreError
 
 import ha
 from agent import HomeAssistantAgent
@@ -34,6 +35,8 @@ _current_file = _data_dir / "current_conversation"
 
 # one SQLite file per conversation; handed to AgentServer(store=...) in main.py
 store = LocalStore(_data_dir / "sessions")
+# the sessions the A2A endpoint has loaded, by conversation, for the history view
+_live: dict[str, AgentSession] = {}
 
 
 class _Conversation:
@@ -130,6 +133,60 @@ class _Conversation:
                 lines.append("")
             return conversation_id, "\n".join([*lines, answer])
 
+    async def history(self, limit: int) -> dict[str, object]:
+        """The current conversation's latest ``limit`` messages and tool calls, shaped
+        like the card's conversation items."""
+        conversation_id = self._conversation_id
+        if conversation_id is None and _current_file.exists():
+            conversation_id = _current_file.read_text().strip() or None
+        items = []
+        if conversation_id and (session := _live.get(conversation_id)) is not None:
+            items = list(session.history.items)
+        elif conversation_id:
+            # not loaded, so read what the last close saved; this stamps the row closed
+            # again, and leaves a new conversation an empty row that loads as new
+            stored = store.session(
+                conversation_id, conversation_id, endpoint=A2A_ENDPOINT
+            )
+            try:
+                record = await stored.load()
+                items = list(record.history) if record else []
+            except StoreError:
+                logger.warning("could not read conversation %s", conversation_id)
+            finally:
+                with contextlib.suppress(StoreError):
+                    await stored.release()
+
+        outputs = {i.call_id: i for i in items if i.type == "function_call_output"}
+        shown: list[dict[str, object]] = []
+        for item in items:
+            ts = int(item.created_at * 1000)
+            if item.type == "message" and item.role in ("user", "assistant"):
+                if text := item.text_content:
+                    role = "user" if item.role == "user" else "agent"
+                    shown.append(
+                        {"kind": "message", "id": item.id, "role": role, "text": text}
+                        | {"ts": ts}
+                    )
+            elif item.type == "function_call":
+                try:
+                    args = json.loads(item.arguments or "{}")
+                except ValueError:
+                    args = item.arguments
+                out = outputs.get(item.call_id)
+                status = (
+                    "running" if out is None else "error" if out.is_error else "done"
+                )
+                shown.append(
+                    {"kind": "action", "id": item.id, "ts": ts, "name": item.name}
+                    | {"args": args, "status": status}
+                )
+        return {
+            "conversation_id": conversation_id,
+            "busy": self._lock.locked(),
+            "items": shown[-limit:],
+        }
+
 
 class _LiveActivity:
     """One turn's progress as a Live Activity on the phone, updated in place.
@@ -199,6 +256,8 @@ class _LiveActivity:
         data: dict[str, object] = {"tag": self._tag}
         if live:
             data |= {"live_update": True, "notification_icon": icon, "silent": True}
+            if settings.text_live_url:
+                data["url"] = settings.text_live_url
         await ha.push(settings.text_live_activity, message, data, title=self._title)
 
     async def _send_all(self) -> None:
@@ -216,22 +275,6 @@ def mount(server: AgentServer) -> None:
         logger.warning("TEXT_API_TOKEN is not set, so the text chat endpoints are off")
         return
     _data_dir.mkdir(parents=True, exist_ok=True)
-
-    @server.a2a_session(
-        endpoint=A2A_ENDPOINT,
-        description="Controls the home through Home Assistant.",
-        idle_timeout=settings.text_idle_timeout,
-    )
-    async def serve(ctx: A2ASessionContext) -> None:
-        session = AgentSession(llm=inference.LLM(settings.llm_model), max_tool_steps=8)
-        agent = HomeAssistantAgent()
-        # None when the caller names no conversation, which then lives in memory only
-        await session.start(agent=agent, persist=ctx.persisted)
-        # a loaded conversation keeps only its latest items, so the prompt stays bounded
-        await agent.update_chat_ctx(
-            agent.chat_ctx.copy().truncate(max_items=settings.text_max_items)
-        )
-        ctx.attach(session)
 
     @server.http.middleware("http")
     async def require_token(request: Request, call_next):
@@ -269,3 +312,27 @@ def mount(server: AgentServer) -> None:
             logger.exception("text chat failed")
             return PlainTextResponse(f"[error] {exc}", status_code=502)
         return PlainTextResponse(reply, headers={"X-Conversation-Id": conversation_id})
+
+    @server.http.get(f"{CHAT_PATH}/history")
+    async def chat_history(limit: int = 200) -> JSONResponse:
+        """The current conversation for a UI to render; `busy` while a turn runs."""
+        return JSONResponse(await conversation.history(limit))
+
+    # after the routes above: the A2A binding mounts a catch-all that shadows later ones
+    @server.a2a_session(
+        endpoint=A2A_ENDPOINT,
+        description="Controls the home through Home Assistant.",
+        idle_timeout=settings.text_idle_timeout,
+    )
+    async def serve(ctx: A2ASessionContext) -> None:
+        session = AgentSession(llm=inference.LLM(settings.llm_model), max_tool_steps=8)
+        agent = HomeAssistantAgent()
+        # None when the caller names no conversation, which then lives in memory only
+        await session.start(agent=agent, persist=ctx.persisted)
+        _live[ctx.context_id] = session
+        session.on("close", lambda _: _live.pop(ctx.context_id, None))
+        # a loaded conversation keeps only its latest items, so the prompt stays bounded
+        await agent.update_chat_ctx(
+            agent.chat_ctx.copy().truncate(max_items=settings.text_max_items)
+        )
+        ctx.attach(session)
