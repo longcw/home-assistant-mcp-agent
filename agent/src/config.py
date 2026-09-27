@@ -60,7 +60,7 @@ class Settings:
     text_live_activity: str
     # Page the Live Activity opens in the HA app when tapped, e.g. a dashboard view.
     text_live_url: str
-    # Seconds the finished turn's Live Activity stays before it is cleared.
+    # Seconds after the last text turn before its Live Activity is cleared.
     text_live_clear_after: float
     # Upper bound on one text reply, kept under the reverse proxy's 90 s read timeout.
     text_reply_timeout: float
@@ -91,7 +91,7 @@ def load_settings() -> Settings:
         text_max_items=int(os.getenv("TEXT_MAX_ITEMS", "100")),
         text_live_activity=os.getenv("TEXT_LIVE_ACTIVITY", ""),
         text_live_url=os.getenv("TEXT_LIVE_URL", ""),
-        text_live_clear_after=float(os.getenv("TEXT_LIVE_CLEAR_AFTER", "60")),
+        text_live_clear_after=float(os.getenv("TEXT_LIVE_CLEAR_AFTER", "900")),
         text_reply_timeout=float(os.getenv("TEXT_REPLY_TIMEOUT", "80")),
     )
 

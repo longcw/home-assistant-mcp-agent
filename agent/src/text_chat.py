@@ -48,6 +48,7 @@ class _Conversation:
         self._client: A2AClient | None = None
         self._conversation_id: str | None = None
         self._lock = asyncio.Lock()
+        self._live_activity = _LiveActivity()
 
     async def _open(self, renew: bool) -> tuple[A2AClient, str, bool]:
         """The client for this turn, its conversation, and whether that one is new."""
@@ -87,7 +88,9 @@ class _Conversation:
             client, conversation_id, started = await self._open(renew)
             if not text:
                 return conversation_id, "Started a new conversation."
-            live = _LiveActivity.start(text) if settings.text_live_activity else None
+            live = self._live_activity if settings.text_live_activity else None
+            if live:
+                live.begin(text)
             lines = ["(new conversation)"] if steps and started else []
             said: list[str] = []
             answer, ok = "", True
@@ -189,34 +192,31 @@ class _Conversation:
 
 
 class _LiveActivity:
-    """One turn's progress as a Live Activity on the phone, updated in place.
+    """The text conversation's Live Activity on the phone, updated in place each turn.
 
     Built on the HA companion app: a notification with ``live_update`` and a ``tag``
-    starts it, and each later one with that tag replaces it.
+    starts it, and each later one with that tag replaces it. iOS rations how many
+    activities an app may start by push, so every turn shares one tag and updates the
+    running activity; it clears TEXT_LIVE_CLEAR_AFTER seconds after the last turn.
     """
 
-    _last: _LiveActivity | None = None
-    _clearing: asyncio.Task[None] | None = None
+    TAG = "ha-text"
+    TITLE = "Home Assistant"  # fixed once an activity starts, so not the question
 
-    def __init__(self, question: str) -> None:
-        self._title = question[:60]
-        self._tag = f"ha-text-{time.time_ns()}"
+    def __init__(self) -> None:
+        self._question = ""
         self._steps: list[str] = []
-        self._outbox: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
-        self._sender = asyncio.create_task(self._send_all())
+        # (message, icon), or (clear_notification, None) to end the activity
+        self._outbox: asyncio.Queue[tuple[str, str | None]] = asyncio.Queue()
+        self._sender: asyncio.Task[None] | None = None
+        self._clear: asyncio.Task[None] | None = None
 
-    @classmethod
-    def start(cls, question: str) -> _LiveActivity:
-        """Open an activity for this question, clearing the previous one."""
-        if (last := cls._last) is not None and not last._sender.done():
-            last._sender.cancel()
-            # held on the class so the task is not collected before it runs
-            cls._clearing = asyncio.create_task(
-                last._push("clear_notification", "", live=False)
-            )
-        cls._last = activity = cls(question)
-        activity._outbox.put_nowait(("…", "mdi:robot"))
-        return activity
+    def begin(self, question: str) -> None:
+        if self._clear is not None:
+            self._clear.cancel()
+        self._question = question if len(question) <= 60 else f"{question[:59]}…"
+        self._steps = []
+        self._put(["…"], "mdi:robot")
 
     def step(self, tool: str, args: object) -> None:
         values = args.values() if isinstance(args, dict) else [args] if args else []
@@ -225,8 +225,7 @@ class _LiveActivity:
         ]
         self._steps.append(" · ".join([tool, *shown])[:80])
         done = [f"✓ {s}" for s in self._steps[-3:-1]]
-        message = "\n".join([*done, f"… {self._steps[-1]}"])
-        if tool.startswith(("HassTurnOff",)):
+        if tool.startswith("HassTurnOff"):
             icon = "mdi:power-off"
         elif tool.startswith(("HassTurnOn", "HassToggle")):
             icon = "mdi:power"
@@ -238,34 +237,38 @@ class _LiveActivity:
             icon = "mdi:bell-ring"
         else:
             icon = "mdi:magnify"
-        self._outbox.put_nowait((message, icon))
+        self._put([*done, f"… {self._steps[-1]}"], icon)
 
     def report(self, text: str) -> None:
         if text:
             done = [f"✓ {s}" for s in self._steps[-2:]]
-            self._outbox.put_nowait(
-                ("\n".join([*done, f"… {text}"]), "mdi:progress-clock")
-            )
+            self._put([*done, f"… {text}"], "mdi:progress-clock")
 
     def finish(self, answer: str, *, ok: bool) -> None:
         icon = "mdi:check-circle" if ok else "mdi:alert-circle"
-        self._outbox.put_nowait((answer[:250] or "Done.", icon))
-        self._outbox.put_nowait(None)
+        self._put([answer[:250] or "Done."], icon)
+        self._clear = asyncio.create_task(self._clear_later())
 
-    async def _push(self, message: str, icon: str, *, live: bool = True) -> None:
-        data: dict[str, object] = {"tag": self._tag}
-        if live:
-            data |= {"live_update": True, "notification_icon": icon, "silent": True}
-            if settings.text_live_url:
-                data["url"] = settings.text_live_url
-        await ha.push(settings.text_live_activity, message, data, title=self._title)
+    def _put(self, lines: list[str], icon: str | None) -> None:
+        message = "\n".join([f"› {self._question}", *lines]) if icon else lines[0]
+        self._outbox.put_nowait((message, icon))
+        if self._sender is None or self._sender.done():
+            self._sender = asyncio.create_task(self._send_all())
 
     async def _send_all(self) -> None:
-        # one sender per activity, so its updates reach the phone in order
-        while (update := await self._outbox.get()) is not None:
-            await self._push(*update)
+        # one sender, so updates reach the phone in order
+        while True:
+            message, icon = await self._outbox.get()
+            data: dict[str, object] = {"tag": self.TAG}
+            if icon:
+                data |= {"live_update": True, "notification_icon": icon, "silent": True}
+                if settings.text_live_url:
+                    data["url"] = settings.text_live_url
+            await ha.push(settings.text_live_activity, message, data, title=self.TITLE)
+
+    async def _clear_later(self) -> None:
         await asyncio.sleep(settings.text_live_clear_after)
-        await self._push("clear_notification", "", live=False)
+        self._put(["clear_notification"], None)
 
 
 def mount(server: AgentServer) -> None:
