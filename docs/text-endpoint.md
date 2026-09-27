@@ -21,6 +21,14 @@ curl -X POST http://192.168.100.121:8952/chat \
 - A reply is capped at `TEXT_REPLY_TIMEOUT` (80 s), under the reverse proxy's 90 s read timeout. A turn that runs out is cancelled and returns whatever the agent had said so far.
 - Both endpoints need `TEXT_API_TOKEN` as a bearer token; with it unset, neither is mounted.
 
+### History, and the card's Text tab
+
+`GET /chat/history?limit=200` (same bearer token) returns `{"conversation_id", "busy", "items"}`: the current conversation's messages and tool calls, shaped like the card's conversation items (`{"kind": "message", "role": "user"|"agent", "text"}` and `{"kind": "action", "name", "args", "status"}`). It reads the loaded session while the conversation is live, and the store otherwise; `busy` is true while a turn runs.
+
+The HA integration (`ha-livekit-agent-frontend`) proxies it and `POST /chat` as `/api/livekit_voice/chat[/history]`, configured with `chat_url` (here `http://127.0.0.1:8952`, since HA runs on the host network) and `chat_token` (`TEXT_API_TOKEN`). The card's **Text** tab renders that conversation, polls it every second while a turn runs, and sends into it; `?lk_tab=text` on a dashboard URL opens the tab, which is what `TEXT_LIVE_URL` points the Live Activity at.
+
+The chat routes are registered before `@server.a2a_session`: the A2A binding mounts a catch-all that shadows GET routes added after it.
+
 ### Live Activity
 
 With `TEXT_LIVE_ACTIVITY` set to a phone's notify service (`mobile_app_long_s_iphone_air`), each turn also shows on that phone's lock screen and Dynamic Island as it runs, with no unlock needed. The title is the question; the message shows the last three steps (`✓` done, `…` the one running) with arguments as plain values, and the icon follows the tool (power for on/off, a magnifier for queries, and so on). The answer replaces it at the end, with a check or an alert icon, and it clears `TEXT_LIVE_CLEAR_AFTER` (60) seconds later, or as soon as the next turn starts.
@@ -66,7 +74,7 @@ A crash loses the turns since the last save. The next request after a drop or a 
 | `livekit-agents` and `livekit-protocol` pinned to commits (`[tool.uv.sources]`) | `agent/pyproject.toml`, `agent/uv.lock` |
 | `git` in the image, for those pins | `agent/Dockerfile` |
 | `AgentServer(store=...)` | `agent/src/main.py`, one line |
-| `livekit.agents.store.LocalStore`, `create_database()` | `agent/src/text_chat.py` |
+| `livekit.agents.store.LocalStore`, `create_database()`, `session(...).load()`/`.release()` and `SessionRecord.history` (the history view of an unloaded conversation), `StoreError` | `agent/src/text_chat.py` |
 | `@server.a2a_session(endpoint=, description=, idle_timeout=)`, `A2ASessionContext.persisted`, `ctx.attach()` | `agent/src/text_chat.py` |
 | `AgentSession.start(persist=)` | `agent/src/text_chat.py` |
 | `livekit.agents.a2a.A2AClient(url, context_id=, headers=)`, `.send()`, `.aclose()`, `TaskInput(text=, conversation_id=)`, `TaskUpdate.state`/`.text`/`.item` (a `FunctionCall` with `update_of` for a progress report) | `agent/src/text_chat.py` |
