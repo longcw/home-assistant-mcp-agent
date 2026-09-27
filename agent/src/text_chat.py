@@ -11,6 +11,7 @@ import asyncio
 import hmac
 import json
 import logging
+import time
 from pathlib import Path
 
 from fastapi import Request
@@ -35,7 +36,7 @@ store = LocalStore(_data_dir / "sessions")
 
 
 class _Conversation:
-    """The one conversation the bridge talks in, kept across restarts until renewed."""
+    """The one conversation the bridge talks in, kept until renewed or left idle."""
 
     def __init__(self, url: str, headers: dict[str, str]) -> None:
         self._url = url
@@ -44,52 +45,79 @@ class _Conversation:
         self._conversation_id: str | None = None
         self._lock = asyncio.Lock()
 
-    async def _open(self, renew: bool) -> A2AClient:
+    async def _open(self, renew: bool) -> tuple[A2AClient, str, bool]:
+        """The client for this turn, its conversation, and whether that one is new."""
         if self._conversation_id is None and _current_file.exists():
             self._conversation_id = _current_file.read_text().strip() or None
+        if self._conversation_id is not None:
+            # touched on every turn, so the file's age is how long the user was away
+            idle = time.time() - _current_file.stat().st_mtime
+            renew = renew or idle > settings.text_renew_after
         if renew and self._client is not None:
             # the goodbye closes the old context on the server, which saves it
             await self._client.aclose()
             self._client = None
-        if renew or self._conversation_id is None:
+        started = renew or self._conversation_id is None
+        if started:
             self._conversation_id = await store.create_database()
             _current_file.write_text(self._conversation_id)
             logger.info("started text conversation %s", self._conversation_id)
+        assert self._conversation_id is not None
+        _current_file.touch()
         if self._client is None:
             # the agent is the only one in the conversation, so its session is the front
             # session and the conversation id doubles as the A2A context id
             self._client = A2AClient(
                 self._url, context_id=self._conversation_id, headers=self._headers
             )
-        return self._client
+        return self._client, self._conversation_id, started
 
-    async def send(self, text: str, *, renew: bool = False) -> tuple[str, str]:
-        """Send one user turn and return (conversation id, the agent's reply)."""
+    async def send(
+        self, text: str, *, renew: bool = False, steps: bool = True
+    ) -> tuple[str, str]:
+        """Send one user turn and return (conversation id, the agent's reply).
+
+        With ``steps``, the reply is preceded by one line per tool call the turn made.
+        """
         async with self._lock:
-            client = await self._open(renew)
-            assert self._conversation_id is not None
+            client, conversation_id, started = await self._open(renew)
             if not text:
-                return self._conversation_id, "Started a new conversation."
-            task_input = TaskInput(text=text, conversation_id=self._conversation_id)
+                return conversation_id, "Started a new conversation."
+            lines = ["(new conversation)"] if steps and started else []
             said: list[str] = []
+            answer = ""
+            task_input = TaskInput(text=text, conversation_id=conversation_id)
             async with client.send(task_input) as stream:
                 try:
                     async with asyncio.timeout(settings.text_reply_timeout):
                         async for update in stream:
-                            if update.state == "working":
-                                if update.text:
-                                    said.append(update.text)
-                                continue
-                            if update.state in ("failed", "canceled"):
-                                reply = f"[{update.state}] {update.text}"
-                                return self._conversation_id, reply
-                            reply = update.text or "\n".join(said)
-                            return self._conversation_id, reply
+                            item = update.item
+                            if item is not None and item.type == "function_call":
+                                # a tool's progress report is a call naming the call it
+                                # reports on, with the report as the update's text
+                                if steps and item.update_of:
+                                    lines.append(f"  … {update.text}")
+                                elif steps:
+                                    try:
+                                        args = json.loads(item.arguments or "{}")
+                                    except ValueError:
+                                        args = item.arguments
+                                    args = json.dumps(args, ensure_ascii=False)
+                                    args = args.removeprefix("{}")
+                                    lines.append(f"→ {item.name}({args[:120]})")
+                            elif update.text:
+                                said.append(update.text)
+                            if update.state != "working":
+                                answer = update.text or (said[-1] if said else "")
+                                if update.state in ("failed", "canceled"):
+                                    answer = f"[{update.state}] {answer}"
+                                break
                 except TimeoutError:
                     await stream.cancel("the text client stopped waiting")
-                    partial = "\n".join(said)
-                    return self._conversation_id, partial or "[timeout] still working"
-            return self._conversation_id, "\n".join(said)
+                    answer = "\n".join(["[timeout] still working", *said])
+            if lines:
+                lines.append("")
+            return conversation_id, "\n".join([*lines, answer])
 
 
 def mount(server: AgentServer) -> None:
@@ -107,8 +135,13 @@ def mount(server: AgentServer) -> None:
     )
     async def serve(ctx: A2ASessionContext) -> None:
         session = AgentSession(llm=inference.LLM(settings.llm_model), max_tool_steps=8)
+        agent = HomeAssistantAgent()
         # None when the caller names no conversation, which then lives in memory only
-        await session.start(agent=HomeAssistantAgent(), persist=ctx.persisted)
+        await session.start(agent=agent, persist=ctx.persisted)
+        # a loaded conversation keeps only its latest items, so the prompt stays bounded
+        await agent.update_chat_ctx(
+            agent.chat_ctx.copy().truncate(max_items=settings.text_max_items)
+        )
         ctx.attach(session)
 
     @server.http.middleware("http")
@@ -126,18 +159,23 @@ def mount(server: AgentServer) -> None:
 
     @server.http.post(CHAT_PATH)
     async def chat(request: Request) -> Response:
-        """Take `{"text": ..., "new": bool}` or plain text, and reply in plain text."""
+        """Take `{"text", "new", "steps"}` JSON or plain text; reply in plain text."""
         body = (await request.body()).decode().strip()
-        text, renew = body, False
+        text, renew, steps = body, False, True
         if request.headers.get("content-type", "").startswith("application/json"):
             data = json.loads(body or "{}")
             text = str(data.get("text") or "").strip()
             renew = bool(data.get("new"))
-        renew = renew or request.query_params.get("new", "") in ("1", "true", "yes")
+            steps = bool(data.get("steps", True))
+        query = request.query_params
+        renew = renew or query.get("new", "") in ("1", "true", "yes")
+        steps = steps and query.get("steps", "") not in ("0", "false", "no")
         if not text and not renew:
             return PlainTextResponse("no text given", status_code=400)
         try:
-            conversation_id, reply = await conversation.send(text, renew=renew)
+            conversation_id, reply = await conversation.send(
+                text, renew=renew, steps=steps
+            )
         except Exception as exc:
             logger.exception("text chat failed")
             return PlainTextResponse(f"[error] {exc}", status_code=502)

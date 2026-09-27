@@ -52,6 +52,10 @@ class Settings:
     text_data_dir: str
     # Seconds a quiet text conversation stays loaded before it is saved and dropped.
     text_idle_timeout: float
+    # Seconds since the last text turn after which the next starts a new conversation.
+    text_renew_after: float
+    # Chat items a loaded text conversation keeps; older ones are dropped.
+    text_max_items: int
     # Upper bound on one text reply, kept under the reverse proxy's 90 s read timeout.
     text_reply_timeout: float
 
@@ -77,6 +81,8 @@ def load_settings() -> Settings:
         text_api_token=os.getenv("TEXT_API_TOKEN", ""),
         text_data_dir=os.getenv("TEXT_DATA_DIR", "/data"),
         text_idle_timeout=float(os.getenv("TEXT_IDLE_TIMEOUT", "300")),
+        text_renew_after=float(os.getenv("TEXT_RENEW_AFTER", str(8 * 3600))),
+        text_max_items=int(os.getenv("TEXT_MAX_ITEMS", "100")),
         text_reply_timeout=float(os.getenv("TEXT_REPLY_TIMEOUT", "80")),
     )
 
