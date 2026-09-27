@@ -5,8 +5,8 @@ Run on a Mac (signing uses the `shortcuts` CLI):
     uv run --no-project python scripts/make_shortcut.py -o "Ask Home.shortcut" \\
         [--url URL] [--token TOKEN]
 
-The URL and token are asked for on import, prefilled with what is given here. The
-shortcut loops: ask, send, show the reply; Cancel on the question ends it.
+The URL and token are asked for on import, prefilled with what is given here. Each run
+asks one question, sends it, and shows the reply with the tool calls it made.
 """
 
 import argparse
@@ -49,9 +49,7 @@ def dictionary(items: dict[str, dict]) -> dict:
 
 
 def build(url: str, token: str) -> dict:
-    url_id, token_id, ask_id, get_id, loop_id = (
-        str(uuid.uuid4()).upper() for _ in range(5)
-    )
+    url_id, token_id, ask_id, get_id = (str(uuid.uuid4()).upper() for _ in range(4))
     actions = [
         {
             "WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
@@ -60,14 +58,6 @@ def build(url: str, token: str) -> dict:
         {
             "WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
             "WFWorkflowActionParameters": {"UUID": token_id, "WFTextActionText": token},
-        },
-        {
-            "WFWorkflowActionIdentifier": "is.workflow.actions.repeat.count",
-            "WFWorkflowActionParameters": {
-                "GroupingIdentifier": loop_id,
-                "WFControlFlowMode": 0,
-                "WFRepeatCount": 50,
-            },
         },
         {
             "WFWorkflowActionIdentifier": "is.workflow.actions.ask",
@@ -97,13 +87,6 @@ def build(url: str, token: str) -> dict:
             "WFWorkflowActionIdentifier": "is.workflow.actions.showresult",
             "WFWorkflowActionParameters": {
                 "Text": text(OBJ, (get_id, "Contents of URL"))
-            },
-        },
-        {
-            "WFWorkflowActionIdentifier": "is.workflow.actions.repeat.count",
-            "WFWorkflowActionParameters": {
-                "GroupingIdentifier": loop_id,
-                "WFControlFlowMode": 2,
             },
         },
     ]
