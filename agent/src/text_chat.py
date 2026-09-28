@@ -194,15 +194,17 @@ class _Conversation:
 class _PhoneProgress:
     """A text turn's progress on the phone, updated in place as the turn moves.
 
-    Every push carries one ``tag``, so each updates the last, and only the question and
-    the answer alert. In ``activity`` mode it is a Live Activity under a fixed title
-    (iOS fixes it at start), one line per update, and a step's alert is title-only so
-    it lands without a buzz; it clears TEXT_LIVE_CLEAR_AFTER seconds after the last
-    turn, since iOS rations how many an app may start. In ``notification`` mode it is a
-    notification titled with the question, and each step is a passive update.
+    Every push carries one ``tag``, so each updates the last. In ``activity`` mode it is
+    a silent Live Activity under a fixed title (iOS fixes it at start), one line per
+    update, each with a title-only alert so it lands without a buzz; the answer also
+    comes as a regular notification with sound, since iOS refuses push-started
+    activities once its allowance is spent. The activity clears TEXT_LIVE_CLEAR_AFTER
+    seconds after the last turn. In ``notification`` mode it is a notification titled
+    with the question: the question and the answer pop, and each step is passive.
     """
 
     TAG = "ha-text"
+    ANSWER_TAG = "ha-text-answer"
     ACTIVITY_TITLE = "Home Assistant"
 
     def __init__(self) -> None:
@@ -255,6 +257,15 @@ class _PhoneProgress:
         icon = "mdi:check-circle" if ok else "mdi:alert-circle"
         self._put([answer], answer, "Done" if ok else "Failed", icon, pop=True)
         if self._activity:
+            # the answer is what is awaited, so it must reach the phone even when the
+            # activity never started; cleared first so it pops rather than updates
+            data: dict[str, object] = {"tag": self.ANSWER_TAG}
+            if settings.text_live_url:
+                data["url"] = settings.text_live_url
+            self._outbox.put_nowait(
+                ("clear_notification", "", {"tag": self.ANSWER_TAG})
+            )
+            self._outbox.put_nowait((answer, self._question, data))
             self._clear = asyncio.create_task(self._clear_later())
 
     def _put(
@@ -272,9 +283,8 @@ class _PhoneProgress:
                 "critical_text": status,
                 "notification_icon": icon,
             }
-            if not pop:
-                # the relay uses a given alert as is: title-only lands without the buzz
-                data["alert"] = {"title": ""}
+            # the relay uses a given alert as is: title-only lands without the buzz
+            data["alert"] = {"title": ""}
         else:
             message, title = "\n".join(lines), self._question
             if pop:
