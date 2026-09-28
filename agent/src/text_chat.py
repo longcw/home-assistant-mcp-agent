@@ -62,7 +62,7 @@ class _Conversation:
         """The client for this turn, its conversation, and whether that one is new."""
         if self._conversation_id is None and _current_file.exists():
             self._conversation_id = _current_file.read_text().strip() or None
-        if self._conversation_id is not None:
+        if self._conversation_id is not None and settings.text_renew_after > 0:
             # touched on every turn, so the file's age is how long the user was away
             idle = time.time() - _current_file.stat().st_mtime
             renew = renew or idle > settings.text_renew_after

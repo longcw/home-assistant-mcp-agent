@@ -16,8 +16,8 @@ curl -X POST http://192.168.100.121:8952/chat \
 - The body is either JSON `{"text": "...", "new": false, "steps": true}` or plain text. `?new=1` and `?steps=0` work too.
 - The reply is plain text: one line per tool call the turn made (`→ HassTurnOn({"name": "客厅 灯"})`, plus `  … ` lines for a tool's progress reports), a blank line, then the agent's answer. `"steps": false` returns the answer alone, which suits *Speak Text*. A turn that started a new conversation begins with `(new conversation)`. The `X-Conversation-Id` header names the conversation.
 - The reply comes back whole, not streamed: an iPhone Shortcut's *Get Contents of URL* waits for the full body, so streamed output would show no sooner there. The step lines are how a turn's work is shown, and the phone progress below is how it is shown while it runs.
-- Requests go into one conversation, so the agent remembers earlier turns, across restarts too. The next request after `TEXT_RENEW_AFTER` (8 h) without one starts a new conversation on its own, so an evening's chat is not the next morning's. `"new": true` starts one now; with no `text` it only does that.
-- A loaded conversation keeps only its latest `TEXT_MAX_ITEMS` (100) chat items in the agent's context, cut with `ChatContext.truncate()` each time it loads. The session's own history, which the model never reads, is not cut, and a renewal bounds it anyway.
+- Requests go into one conversation, so the agent remembers earlier turns, across restarts too, until a new one is asked for: `"new": true`, or the new-conversation button on the card's Text tab (with no `text` it only starts the new one). Setting `TEXT_RENEW_AFTER` to a number of seconds also starts one on its own after that long without a request; it is off by default.
+- A loaded conversation keeps only its latest `TEXT_MAX_ITEMS` (100) chat items in the agent's context, cut with `ChatContext.truncate()` each time it loads. The session's own history, which the model never reads and the Text tab shows, is not cut; it grows by a few items per turn until a new conversation starts.
 - A reply is capped at `TEXT_REPLY_TIMEOUT` (80 s), under the reverse proxy's 90 s read timeout. A turn that runs out is cancelled and returns whatever the agent had said so far.
 - Both endpoints need `TEXT_API_TOKEN` as a bearer token; with it unset, neither is mounted.
 
@@ -74,7 +74,7 @@ POST /chat  ──►  bridge (A2AClient)  ──►  /home-assistant  (A2A endp
 The framework saves a session **once, when it closes**. Here that is:
 
 - after `TEXT_IDLE_TIMEOUT` seconds (300) with no request, when the endpoint drops the context;
-- when `"new": true` or the renewal after `TEXT_RENEW_AFTER` closes it (the bridge sends the A2A goodbye first);
+- when a new conversation replaces it (`"new": true`, or `TEXT_RENEW_AFTER` when set; the bridge sends the A2A goodbye first);
 - on a graceful shutdown (`docker compose stop`/`restart`; `stop_grace_period: 30s` in the compose file).
 
 A crash loses the turns since the last save. The next request after a drop or a restart rehydrates the session from SQLite (`rehydrated a persisted session` in the log).
