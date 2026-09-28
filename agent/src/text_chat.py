@@ -257,11 +257,12 @@ class _PhoneProgress:
     """A text turn's progress on the phone, updated in place as the turn moves.
 
     Every push carries one ``tag``, so each updates the last. In ``activity`` mode it is
-    a silent Live Activity under a fixed title (iOS fixes it at start), one line per
-    update, each with a title-only alert so it lands without a buzz; the question and
-    the answer also come as a regular notification with sound, since iOS refuses
-    push-started activities once its allowance is spent. The activity clears
-    TEXT_LIVE_CLEAR_AFTER seconds after the last turn. In ``notification`` mode it is a
+    a Live Activity under a fixed title (iOS fixes it at start), one line per update:
+    its start alerts, since iOS starts none from a push whose alert is empty, and each
+    later update carries a title-only alert so it lands without a buzz. The answer also
+    comes as a regular notification with sound, since iOS refuses push-started
+    activities once its allowance is spent. The activity clears TEXT_LIVE_CLEAR_AFTER
+    seconds after the last turn. In ``notification`` mode it is a
     notification titled with the question: the question and the answer pop, and each
     step is passive.
     """
@@ -286,9 +287,7 @@ class _PhoneProgress:
             self._clear.cancel()
         self._question = question if len(question) <= 60 else f"{question[:59]}…"
         self._steps = []
-        self._put(["…"], f"› {self._question}", "…", "mdi:robot", pop=True)
-        if self._activity:
-            self._notice("…")
+        self._put(["…"], f"› {self._question}", "…", "mdi:robot", pop=True, start=True)
 
     def step(self, tool: str, args: object) -> None:
         values = args.values() if isinstance(args, dict) else [args] if args else []
@@ -351,6 +350,7 @@ class _PhoneProgress:
         icon: str,
         *,
         pop: bool = False,
+        start: bool = False,
         actions: list[dict[str, object]] | None = None,
     ) -> None:
         """Queue one update: ``lines`` is a notification's body, ``line`` and
@@ -365,8 +365,9 @@ class _PhoneProgress:
                 "critical_text": status,
                 "notification_icon": icon,
             }
-            # the relay uses a given alert as is: title-only lands without the buzz
-            data["alert"] = {"title": ""}
+            if not start:
+                # the relay uses a given alert as is: title-only lands without the buzz
+                data["alert"] = {"title": ""}
         else:
             message, title = "\n".join(lines), self._question
             if actions:
