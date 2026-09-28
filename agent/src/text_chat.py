@@ -194,13 +194,12 @@ class _Conversation:
 class _PhoneProgress:
     """A text turn's progress on the phone, updated in place as the turn moves.
 
-    Every push carries one ``tag``, so each updates the last. In ``activity`` mode it is
-    a Live Activity: one line per update (the lock screen shows about one) under a fixed
-    title, since iOS fixes the title at start; never ``silent``, whose priority-5 pushes
-    the phone stopped applying; cleared TEXT_LIVE_CLEAR_AFTER seconds after the last
-    turn, since iOS rations how many an app may start. In ``notification`` mode it is
-    an ordinary notification titled with the question: the question and the answer pop
-    with sound, and each tool call is appended silently as a passive update.
+    Every push carries one ``tag``, so each updates the last, and only the question and
+    the answer alert. In ``activity`` mode it is a Live Activity under a fixed title
+    (iOS fixes it at start), one line per update, and a step's alert is title-only so
+    it lands without a buzz; it clears TEXT_LIVE_CLEAR_AFTER seconds after the last
+    turn, since iOS rations how many an app may start. In ``notification`` mode it is a
+    notification titled with the question, and each step is a passive update.
     """
 
     TAG = "ha-text"
@@ -273,6 +272,9 @@ class _PhoneProgress:
                 "critical_text": status,
                 "notification_icon": icon,
             }
+            if not pop:
+                # the relay uses a given alert as is: title-only lands without the buzz
+                data["alert"] = {"title": ""}
         else:
             message, title = "\n".join(lines), self._question
             if pop:
