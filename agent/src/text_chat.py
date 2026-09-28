@@ -262,14 +262,17 @@ class _PhoneProgress:
     later update carries a title-only alert so it lands without a buzz. The answer also
     comes as a regular notification with sound, since iOS refuses push-started
     activities once its allowance is spent. The activity clears TEXT_LIVE_CLEAR_AFTER
-    seconds after the last turn. In ``notification`` mode it is a
-    notification titled with the question: the question and the answer pop, and each
-    step is passive.
+    seconds after the last turn. After a start, updates wait START_SETTLE seconds and
+    only the latest is sent: HA learns the activity's token from the phone some seconds
+    later, and sends an update for a tag it has no token for as another start. In
+    ``notification`` mode it is a notification titled with the question: the question
+    and the answer pop, and each step is passive.
     """
 
     TAG = "ha-text"
     NOTICE_TAG = "ha-text-answer"
     ACTIVITY_TITLE = "Home Assistant"
+    START_SETTLE = 15.0
 
     def __init__(self) -> None:
         self._activity = settings.text_live_mode == "activity"
@@ -281,13 +284,22 @@ class _PhoneProgress:
         )
         self._sender: asyncio.Task[None] | None = None
         self._clear: asyncio.Task[None] | None = None
+        # when this process last started the activity, or None while none is running
+        self._started_at: float | None = None
+        # the latest activity update held back while a start settles
+        self._held: tuple[str, str, dict[str, object]] | None = None
+        self._flush: asyncio.Task[None] | None = None
 
     def begin(self, question: str) -> None:
         if self._clear is not None:
             self._clear.cancel()
         self._question = question if len(question) <= 60 else f"{question[:59]}…"
         self._steps = []
-        self._put(["…"], f"› {self._question}", "…", "mdi:robot", pop=True, start=True)
+        # a running activity takes the question as an update; otherwise it starts one
+        start = self._activity and self._started_at is None
+        if start:
+            self._started_at = time.monotonic()
+        self._put(["…"], f"› {self._question}", "…", "mdi:robot", pop=True, start=start)
 
     def step(self, tool: str, args: object) -> None:
         values = args.values() if isinstance(args, dict) else [args] if args else []
@@ -368,6 +380,12 @@ class _PhoneProgress:
             if not start:
                 # the relay uses a given alert as is: title-only lands without the buzz
                 data["alert"] = {"title": ""}
+                settled = (self._started_at or 0) + self.START_SETTLE
+                if time.monotonic() < settled:
+                    self._held = (message, title, data)
+                    if self._flush is None or self._flush.done():
+                        self._flush = asyncio.create_task(self._flush_at(settled))
+                    return
         else:
             message, title = "\n".join(lines), self._question
             if actions:
@@ -388,8 +406,17 @@ class _PhoneProgress:
             message, title, data = await self._outbox.get()
             await ha.push(settings.text_live_activity, message, data, title=title)
 
+    async def _flush_at(self, settled: float) -> None:
+        await asyncio.sleep(settled - time.monotonic())
+        if self._held is not None:
+            self._outbox.put_nowait(self._held)
+            self._held = None
+            if self._sender is None or self._sender.done():
+                self._sender = asyncio.create_task(self._send_all())
+
     async def _clear_later(self) -> None:
         await asyncio.sleep(settings.text_live_clear_after)
+        self._started_at = None
         self._outbox.put_nowait(("clear_notification", "", {"tag": self.TAG}))
         if self._sender is None or self._sender.done():
             self._sender = asyncio.create_task(self._send_all())
