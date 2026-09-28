@@ -192,16 +192,15 @@ class _Conversation:
 
 
 class _PhoneProgress:
-    """A text turn's progress on the phone, replaced in place as the turn moves.
+    """A text turn's progress on the phone, updated in place as the turn moves.
 
-    Every push carries one ``tag``, and each replaces the last. In ``notification`` mode
-    (the default) that is an ordinary notification titled with the question: it pops
-    with sound when the turn starts, gathers each tool call silently, since iOS alerts
-    once per tag, and is cleared and posted anew so the answer pops with sound too. In
-    ``activity`` mode it is a Live
-    Activity, whose title iOS fixes at start and whose push-to-start fails while the
-    Companion app is closed (home-assistant/iOS#5766); it clears TEXT_LIVE_CLEAR_AFTER
-    seconds after the last turn, since iOS rations how many an app may start.
+    Every push carries one ``tag``, so each updates the last. In ``activity`` mode it is
+    a Live Activity: one line per update (the lock screen shows about one) under a fixed
+    title, since iOS fixes the title at start; never ``silent``, whose priority-5 pushes
+    the phone stopped applying; cleared TEXT_LIVE_CLEAR_AFTER seconds after the last
+    turn, since iOS rations how many an app may start. In ``notification`` mode it is
+    an ordinary notification titled with the question: the question and the answer pop
+    with sound, and each tool call is appended silently as a passive update.
     """
 
     TAG = "ha-text"
@@ -223,7 +222,7 @@ class _PhoneProgress:
             self._clear.cancel()
         self._question = question if len(question) <= 60 else f"{question[:59]}…"
         self._steps = []
-        self._put(["…"], "mdi:robot", pop=True)
+        self._put(["…"], f"› {self._question}", "…", "mdi:robot", pop=True)
 
     def step(self, tool: str, args: object) -> None:
         values = args.values() if isinstance(args, dict) else [args] if args else []
@@ -231,10 +230,6 @@ class _PhoneProgress:
             "/".join(map(str, v)) if isinstance(v, list) else str(v) for v in values
         ]
         self._steps.append(" · ".join([tool, *shown])[:80])
-        if self._activity:
-            lines = [*(f"✓ {s}" for s in self._steps[-3:-1]), f"… {self._steps[-1]}"]
-        else:
-            lines = [f"→ {s}" for s in self._steps]
         if tool.startswith("HassTurnOff"):
             icon = "mdi:power-off"
         elif tool.startswith(("HassTurnOn", "HassToggle")):
@@ -247,40 +242,47 @@ class _PhoneProgress:
             icon = "mdi:bell-ring"
         else:
             icon = "mdi:magnify"
-        self._put(lines, icon)
+        lines = [f"→ {s}" for s in self._steps]
+        self._put(lines, lines[-1], f"Step {len(self._steps)}", icon)
 
     def report(self, text: str) -> None:
-        if not text:
-            return
-        if self._activity:
-            lines = [*(f"✓ {s}" for s in self._steps[-2:]), f"… {text}"]
-        else:
+        if text:
             lines = [*(f"→ {s}" for s in self._steps), f"  … {text}"]
-        self._put(lines, "mdi:progress-clock")
+            status = f"Step {len(self._steps)}"
+            self._put(lines, f"… {text}", status, "mdi:progress-clock")
 
     def finish(self, answer: str, *, ok: bool) -> None:
+        answer = answer or "Done."
         icon = "mdi:check-circle" if ok else "mdi:alert-circle"
-        self._put([answer or "Done."], icon, pop=True)
+        self._put([answer], answer, "Done" if ok else "Failed", icon, pop=True)
         if self._activity:
             self._clear = asyncio.create_task(self._clear_later())
 
-    def _put(self, lines: list[str], icon: str, *, pop: bool = False) -> None:
+    def _put(
+        self, lines: list[str], line: str, status: str, icon: str, *, pop: bool = False
+    ) -> None:
+        """Queue one update: ``lines`` is a notification's body, ``line`` and
+        ``status`` a Live Activity's message and short status."""
         data: dict[str, object] = {"tag": self.TAG}
         if settings.text_live_url:
             data["url"] = settings.text_live_url
         if self._activity:
-            lines = [f"› {self._question}", *lines]
-            lines[-1] = lines[-1][:250]
-            title = self.ACTIVITY_TITLE
-            data |= {"live_update": True, "notification_icon": icon, "silent": True}
+            message, title = line[:250], self.ACTIVITY_TITLE
+            data |= {
+                "live_update": True,
+                "critical_text": status,
+                "notification_icon": icon,
+            }
         else:
-            title = self._question
+            message, title = "\n".join(lines), self._question
             if pop:
                 # a replacement under one tag updates silently, so clear it to pop again
                 self._outbox.put_nowait(("clear_notification", "", {"tag": self.TAG}))
             else:
-                data["push"] = {"sound": "none"}
-        self._outbox.put_nowait(("\n".join(lines), title, data))
+                # appended to the question's notification, or, once that is gone,
+                # delivered without a banner or a sound
+                data["push"] = {"interruption-level": "passive", "sound": "none"}
+        self._outbox.put_nowait((message, title, data))
         if self._sender is None or self._sender.done():
             self._sender = asyncio.create_task(self._send_all())
 
