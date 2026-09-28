@@ -208,6 +208,8 @@ class _Conversation:
 
         outputs = {i.call_id: i for i in items if i.type == "function_call_output"}
         shown: list[dict[str, object]] = []
+        # the quick replies offered since the user last spoke, for a UI's chips
+        suggestions: list[str] = []
         for item in items:
             ts = int(item.created_at * 1000)
             if item.type == "message" and item.role in ("user", "assistant"):
@@ -217,6 +219,8 @@ class _Conversation:
                         {"kind": "message", "id": item.id, "role": role, "text": text}
                         | {"ts": ts}
                     )
+                    if role == "user":
+                        suggestions = []
             elif item.type == "function_call":
                 try:
                     args = json.loads(item.arguments or "{}")
@@ -226,14 +230,26 @@ class _Conversation:
                 status = (
                     "running" if out is None else "error" if out.is_error else "done"
                 )
-                shown.append(
-                    {"kind": "action", "id": item.id, "ts": ts, "name": item.name}
-                    | {"args": args, "status": status}
-                )
+                action: dict[str, object] = {
+                    "kind": "action",
+                    "id": item.id,
+                    "call_id": item.call_id,
+                    "ts": ts,
+                    "name": item.name,
+                    "args": args,
+                    "status": status,
+                }
+                # short outputs only (a scheduled task, say), not a home's device list
+                if out is not None and len(out.output) <= 1000:
+                    action["output"] = out.output
+                shown.append(action)
+                if item.name == "suggest_replies" and isinstance(args, dict):
+                    suggestions = [str(r) for r in args.get("replies") or []]
         return {
             "conversation_id": conversation_id,
             "busy": self._lock.locked(),
             "items": shown[-limit:],
+            "suggestions": suggestions,
         }
 
 
