@@ -254,52 +254,36 @@ class _Conversation:
 
 
 class _PhoneProgress:
-    """A text turn's progress on the phone, updated in place as the turn moves.
+    """A text turn's progress on the phone, sent in order as the turn moves.
 
-    Every push carries one ``tag``, so each updates the last. In ``activity`` mode it is
-    a Live Activity under a fixed title (iOS fixes it at start), one line per update:
-    its start alerts, since iOS starts none from a push whose alert is empty, and each
-    later update carries a title-only alert so it lands without a buzz. The answer also
-    comes as a regular notification with sound, since iOS refuses push-started
-    activities once its allowance is spent. The activity clears TEXT_LIVE_CLEAR_AFTER
-    seconds after the last turn. After a start, updates wait START_SETTLE seconds and
-    only the latest is sent: HA learns the activity's token from the phone some seconds
-    later, and sends an update for a tag it has no token for as another start. In
-    ``notification`` mode it is a notification titled with the question: the question
-    and the answer pop, and each step is passive.
+    In ``activity`` mode each phase goes to the livekit_voice integration's progress
+    API, which runs inside Home Assistant and can see whether the phone's Live Activity
+    is running: it starts or updates the activity, and sends the answer as a
+    notification with sound only when the activity cannot carry it. In
+    ``notification`` mode it is one notification titled with the question, under a
+    fixed tag: the question and the answer pop with sound, and each step is appended
+    as a passive update.
     """
 
     TAG = "ha-text"
-    NOTICE_TAG = "ha-text-answer"
-    ACTIVITY_TITLE = "Home Assistant"
-    START_SETTLE = 15.0
 
     def __init__(self) -> None:
         self._activity = settings.text_live_mode == "activity"
         self._question = ""
         self._steps: list[str] = []
-        # (message, title, data), sent in order by one sender
-        self._outbox: asyncio.Queue[tuple[str, str, dict[str, object]]] = (
+        # sent in order by one sender: (message, title, data) or a progress API body
+        self._outbox: asyncio.Queue[tuple[str, str, dict[str, object]] | dict] = (
             asyncio.Queue()
         )
         self._sender: asyncio.Task[None] | None = None
-        self._clear: asyncio.Task[None] | None = None
-        # when this process last started the activity, or None while none is running
-        self._started_at: float | None = None
-        # the latest activity update held back while a start settles
-        self._held: tuple[str, str, dict[str, object]] | None = None
-        self._flush: asyncio.Task[None] | None = None
 
     def begin(self, question: str) -> None:
-        if self._clear is not None:
-            self._clear.cancel()
         self._question = question if len(question) <= 60 else f"{question[:59]}…"
         self._steps = []
-        # a running activity takes the question as an update; otherwise it starts one
-        start = self._activity and self._started_at is None
-        if start:
-            self._started_at = time.monotonic()
-        self._put(["…"], f"› {self._question}", "…", "mdi:robot", pop=True, start=start)
+        if self._activity:
+            self._phase("start", f"› {self._question}", "…", "mdi:robot")
+        else:
+            self._notify(["…"], pop=True)
 
     def step(self, tool: str, args: object) -> None:
         values = args.values() if isinstance(args, dict) else [args] if args else []
@@ -320,106 +304,89 @@ class _PhoneProgress:
         else:
             icon = "mdi:magnify"
         lines = [f"→ {s}" for s in self._steps]
-        self._put(lines, lines[-1], f"Step {len(self._steps)}", icon)
+        if self._activity:
+            self._phase("progress", lines[-1], f"Step {len(self._steps)}", icon)
+        else:
+            self._notify(lines)
 
     def report(self, text: str) -> None:
-        if text:
-            lines = [*(f"→ {s}" for s in self._steps), f"  … {text}"]
+        if not text:
+            return
+        if self._activity:
             status = f"Step {len(self._steps)}"
-            self._put(lines, f"… {text}", status, "mdi:progress-clock")
+            self._phase("progress", f"… {text}", status, "mdi:progress-clock")
+        else:
+            self._notify([*(f"→ {s}" for s in self._steps), f"  … {text}"])
 
     def finish(
         self, answer: str, *, ok: bool, actions: list[dict[str, object]]
     ) -> None:
         answer = answer or "Done."
-        icon = "mdi:check-circle" if ok else "mdi:alert-circle"
-        status = "Done" if ok else "Failed"
         if self._activity:
-            self._put([answer], answer, status, icon, pop=True)
-            self._notice(answer, actions)
-            self._clear = asyncio.create_task(self._clear_later())
+            icon = "mdi:check-circle" if ok else "mdi:alert-circle"
+            self._phase(
+                "final",
+                answer,
+                "Done" if ok else "Failed",
+                icon,
+                answer=answer,
+                question=self._question,
+                actions=actions,
+                clear_after=settings.text_live_clear_after,
+            )
         else:
-            self._put([answer], answer, status, icon, pop=True, actions=actions)
+            self._notify([answer], pop=True, actions=actions)
 
-    def _notice(
-        self, message: str, actions: list[dict[str, object]] | None = None
+    def _phase(
+        self, phase: str, message: str, status: str, icon: str, **extra: object
     ) -> None:
-        """A sounded notification beside the activity, which reaches the phone even
-        when the activity never started; cleared first so it pops, not updates."""
-        data: dict[str, object] = {"tag": self.NOTICE_TAG}
+        body: dict[str, object] = {
+            "phase": phase,
+            "target": settings.text_live_activity,
+            "tag": self.TAG,
+            "message": message,
+            "status": status,
+            "icon": icon,
+            **extra,
+        }
+        if settings.text_live_url:
+            body["url"] = settings.text_live_url
+        self._queue(body)
+
+    def _notify(
+        self,
+        lines: list[str],
+        *,
+        pop: bool = False,
+        actions: list[dict[str, object]] | None = None,
+    ) -> None:
+        data: dict[str, object] = {"tag": self.TAG}
         if settings.text_live_url:
             data["url"] = settings.text_live_url
         if actions:
             data["actions"] = actions
-        self._outbox.put_nowait(("clear_notification", "", {"tag": self.NOTICE_TAG}))
-        self._outbox.put_nowait((message, self._question, data))
-
-    def _put(
-        self,
-        lines: list[str],
-        line: str,
-        status: str,
-        icon: str,
-        *,
-        pop: bool = False,
-        start: bool = False,
-        actions: list[dict[str, object]] | None = None,
-    ) -> None:
-        """Queue one update: ``lines`` is a notification's body, ``line`` and
-        ``status`` a Live Activity's message and short status."""
-        data: dict[str, object] = {"tag": self.TAG}
-        if settings.text_live_url:
-            data["url"] = settings.text_live_url
-        if self._activity:
-            message, title = line[:250], self.ACTIVITY_TITLE
-            data |= {
-                "live_update": True,
-                "critical_text": status,
-                "notification_icon": icon,
-            }
-            if not start:
-                # the relay uses a given alert as is: title-only lands without the buzz
-                data["alert"] = {"title": ""}
-                settled = (self._started_at or 0) + self.START_SETTLE
-                if time.monotonic() < settled:
-                    self._held = (message, title, data)
-                    if self._flush is None or self._flush.done():
-                        self._flush = asyncio.create_task(self._flush_at(settled))
-                    return
+        if pop:
+            # a replacement under one tag updates silently, so clear it to pop again
+            self._queue(("clear_notification", "", {"tag": self.TAG}))
         else:
-            message, title = "\n".join(lines), self._question
-            if actions:
-                data["actions"] = actions
-            if pop:
-                # a replacement under one tag updates silently, so clear it to pop again
-                self._outbox.put_nowait(("clear_notification", "", {"tag": self.TAG}))
-            else:
-                # appended to the question's notification, or, once that is gone,
-                # delivered without a banner or a sound
-                data["push"] = {"interruption-level": "passive", "sound": "none"}
-        self._outbox.put_nowait((message, title, data))
+            # appended to the question's notification, or, once that is gone,
+            # delivered without a banner or a sound
+            data["push"] = {"interruption-level": "passive", "sound": "none"}
+        self._queue(("\n".join(lines), self._question, data))
+
+    def _queue(self, item: tuple[str, str, dict[str, object]] | dict) -> None:
+        self._outbox.put_nowait(item)
         if self._sender is None or self._sender.done():
             self._sender = asyncio.create_task(self._send_all())
 
     async def _send_all(self) -> None:
         while True:
-            message, title, data = await self._outbox.get()
-            await ha.push(settings.text_live_activity, message, data, title=title)
-
-    async def _flush_at(self, settled: float) -> None:
-        await asyncio.sleep(settled - time.monotonic())
-        if self._held is not None:
-            self._outbox.put_nowait(self._held)
-            self._held = None
-            if self._sender is None or self._sender.done():
-                self._sender = asyncio.create_task(self._send_all())
-
-    async def _clear_later(self) -> None:
-        await asyncio.sleep(settings.text_live_clear_after)
-        self._started_at = None
-        self._outbox.put_nowait(("clear_notification", "", {"tag": self.TAG}))
-        if self._sender is None or self._sender.done():
-            self._sender = asyncio.create_task(self._send_all())
+            item = await self._outbox.get()
+            if isinstance(item, dict):
+                await ha.progress(item)
+            else:
+                message, title, data = item
+                await ha.push(settings.text_live_activity, message, data, title=title)
 
 
 def mount(server: AgentServer) -> None:

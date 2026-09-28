@@ -120,3 +120,19 @@ async def subscribe(event_type: str) -> AsyncIterator[dict[str, Any]]:
                 "lost the %s subscription; retrying", event_type, exc_info=True
             )
         await asyncio.sleep(10)
+
+
+async def progress(body: dict[str, Any]) -> bool:
+    """Post one turn phase to the livekit_voice integration's progress API."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{settings.ha_url.rstrip('/')}/api/livekit_voice/progress",
+                headers={"Authorization": f"Bearer {settings.ha_token}"},
+                json=body,
+            )
+            resp.raise_for_status()
+        return True
+    except Exception:
+        logger.exception("failed to post turn progress (%s)", body.get("phase"))
+        return False
