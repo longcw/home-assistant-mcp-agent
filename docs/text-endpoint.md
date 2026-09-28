@@ -38,6 +38,10 @@ With `TEXT_LIVE_ACTIVITY` set to a phone's notify service (`mobile_app_long_s_ip
 
 **What broke it, and how to tell.** Found on 2026-09-27/28: (1) iOS rations push-to-start: after a burst of starts (about seven in 25 minutes on 2026-09-28, with testing) HA-sent starts, the Companion app's own examples sent through HA included, stop starting on the phone; a phone restart brought them back once, and the allowance also refills over hours. The in-app examples keep working throughout because they start locally, not through HA; (2) a new activity per turn, cleared a minute later, spent that allowance fast; (3) `silent` updates go out at APNs priority 5 and the phone never applied them. Updates never use `silent`; a quiet step uses the title-only alert instead. To see what happens, `logger.set_level` `homeassistant.components.mobile_app: debug`: a remote send logs a `rate limits` line, and a started activity makes the phone send a `live_activity_token` webhook within seconds; no such webhook means it never started. Upstream, [home-assistant/iOS#5766](https://github.com/home-assistant/iOS/issues/5766) is open for push-to-start with the app closed.
 
+### Reply buttons
+
+The answer notification carries buttons: each quick reply the agent offered with `suggest_replies` in that turn (such as 确认 / 取消 when it asks to confirm), plus a **Reply** button that takes free text. Tapping one sends that text into the same conversation as the next turn, from the lock screen, without opening the Shortcut. iOS shows the buttons on a long press or when the notification is expanded; each one asks for Face ID first, since a tap can control the house. They are HA [actionable notifications](https://companion.home-assistant.io/docs/notifications/actionable-notifications/) (`activationMode` background): the tap fires `mobile_app_notification_action` in HA, which the agent subscribes to over HA's WebSocket API (`ha.subscribe`). Only the latest answer's buttons are live, and they do not survive an agent restart.
+
 ### iPhone Shortcut
 
 `scripts/make_shortcut.py` builds a signed `.shortcut` file to import (it needs a Mac, for the `shortcuts sign` CLI):

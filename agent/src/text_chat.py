@@ -13,6 +13,7 @@ import hmac
 import json
 import logging
 import time
+import uuid
 from pathlib import Path
 
 from fastapi import Request
@@ -37,6 +38,8 @@ _current_file = _data_dir / "current_conversation"
 store = LocalStore(_data_dir / "sessions")
 # the sessions the A2A endpoint has loaded, by conversation, for the history view
 _live: dict[str, AgentSession] = {}
+# what the agent's suggest_replies offered in the running turn
+_suggested: list[str] = []
 
 
 class _Conversation:
@@ -49,6 +52,11 @@ class _Conversation:
         self._conversation_id: str | None = None
         self._lock = asyncio.Lock()
         self._progress = _PhoneProgress()
+        # the buttons on the latest answer notification: action id -> reply text
+        self._actions: dict[str, str] = {}
+        self._reply_action = ""
+        self._listener: asyncio.Task[None] | None = None
+        self._tapped: set[asyncio.Task[object]] = set()
 
     async def _open(self, renew: bool) -> tuple[A2AClient, str, bool]:
         """The client for this turn, its conversation, and whether that one is new."""
@@ -91,6 +99,9 @@ class _Conversation:
             live = self._progress if settings.text_live_activity else None
             if live:
                 live.begin(text)
+                _suggested.clear()
+                if self._listener is None or self._listener.done():
+                    self._listener = asyncio.create_task(self._listen())
             lines = ["(new conversation)"] if steps and started else []
             said: list[str] = []
             answer, ok = "", True
@@ -129,12 +140,47 @@ class _Conversation:
                     answer = "\n".join(["[timeout] still working", *said])
                     ok = False
             if live:
-                live.finish(answer, ok=ok)
+                # the suggested replies become buttons, and Reply takes free text
+                nonce = uuid.uuid4().hex[:8]
+                replies = list(dict.fromkeys(_suggested))[:4]
+                self._actions = {
+                    f"HATEXT_{nonce}_{i}": r for i, r in enumerate(replies)
+                }
+                self._reply_action = f"HATEXT_{nonce}_REPLY"
+                # a tap can control the house, so it asks for Face ID first
+                actions = [
+                    {"action": k, "title": r, "authenticationRequired": True}
+                    for k, r in self._actions.items()
+                ]
+                actions.append(
+                    {
+                        "action": self._reply_action,
+                        "title": "Reply",
+                        "behavior": "textInput",
+                        "textInputButtonTitle": "Send",
+                        "authenticationRequired": True,
+                    }
+                )
+                live.finish(answer, ok=ok, actions=actions)
             if not steps:
                 lines = []
             elif lines:
                 lines.append("")
             return conversation_id, "\n".join([*lines, answer])
+
+    async def _listen(self) -> None:
+        """Send a tap on the latest answer's buttons into the conversation."""
+        async for event in ha.subscribe("mobile_app_notification_action"):
+            action = event.get("action", "")
+            if action == self._reply_action:
+                reply = (event.get("reply_text") or "").strip()
+            else:
+                reply = self._actions.get(action, "")
+            if reply:
+                logger.info("reply from a notification: %s", reply)
+                task = asyncio.create_task(self.send(reply))
+                self._tapped.add(task)
+                task.add_done_callback(self._tapped.discard)
 
     async def history(self, limit: int) -> dict[str, object]:
         """The current conversation's latest ``limit`` messages and tool calls, shaped
@@ -255,25 +301,41 @@ class _PhoneProgress:
             status = f"Step {len(self._steps)}"
             self._put(lines, f"… {text}", status, "mdi:progress-clock")
 
-    def finish(self, answer: str, *, ok: bool) -> None:
+    def finish(
+        self, answer: str, *, ok: bool, actions: list[dict[str, object]]
+    ) -> None:
         answer = answer or "Done."
         icon = "mdi:check-circle" if ok else "mdi:alert-circle"
-        self._put([answer], answer, "Done" if ok else "Failed", icon, pop=True)
+        status = "Done" if ok else "Failed"
         if self._activity:
-            self._notice(answer)
+            self._put([answer], answer, status, icon, pop=True)
+            self._notice(answer, actions)
             self._clear = asyncio.create_task(self._clear_later())
+        else:
+            self._put([answer], answer, status, icon, pop=True, actions=actions)
 
-    def _notice(self, message: str) -> None:
+    def _notice(
+        self, message: str, actions: list[dict[str, object]] | None = None
+    ) -> None:
         """A sounded notification beside the activity, which reaches the phone even
         when the activity never started; cleared first so it pops, not updates."""
         data: dict[str, object] = {"tag": self.NOTICE_TAG}
         if settings.text_live_url:
             data["url"] = settings.text_live_url
+        if actions:
+            data["actions"] = actions
         self._outbox.put_nowait(("clear_notification", "", {"tag": self.NOTICE_TAG}))
         self._outbox.put_nowait((message, self._question, data))
 
     def _put(
-        self, lines: list[str], line: str, status: str, icon: str, *, pop: bool = False
+        self,
+        lines: list[str],
+        line: str,
+        status: str,
+        icon: str,
+        *,
+        pop: bool = False,
+        actions: list[dict[str, object]] | None = None,
     ) -> None:
         """Queue one update: ``lines`` is a notification's body, ``line`` and
         ``status`` a Live Activity's message and short status."""
@@ -291,6 +353,8 @@ class _PhoneProgress:
             data["alert"] = {"title": ""}
         else:
             message, title = "\n".join(lines), self._question
+            if actions:
+                data["actions"] = actions
             if pop:
                 # a replacement under one tag updates silently, so clear it to pop again
                 self._outbox.put_nowait(("clear_notification", "", {"tag": self.TAG}))
@@ -373,6 +437,7 @@ def mount(server: AgentServer) -> None:
     async def serve(ctx: A2ASessionContext) -> None:
         session = AgentSession(llm=inference.LLM(settings.llm_model), max_tool_steps=8)
         agent = HomeAssistantAgent()
+        agent._suggest_replies_cb = lambda replies: _suggested.extend(replies)
         # None when the caller names no conversation, which then lives in memory only
         await session.start(agent=agent, persist=ctx.persisted)
         _live[ctx.context_id] = session

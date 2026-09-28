@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
+import aiohttp
 import httpx
 from livekit.agents import mcp
 from mcp.types import TextContent
@@ -89,3 +92,31 @@ async def push(
     if title:
         payload["title"] = title
     return await _post_service(f"notify/{service.removeprefix('notify.')}", payload)
+
+
+async def subscribe(event_type: str) -> AsyncIterator[dict[str, Any]]:
+    """Yield the data of each HA event of ``event_type``, reconnecting when dropped."""
+    url = f"{settings.ha_url.rstrip('/').replace('http', 'ws', 1)}/api/websocket"
+    while True:
+        try:
+            async with (
+                aiohttp.ClientSession() as http,
+                http.ws_connect(url, heartbeat=30) as ws,
+            ):
+                await ws.receive_json()  # auth_required
+                await ws.send_json({"type": "auth", "access_token": settings.ha_token})
+                if (await ws.receive_json()).get("type") != "auth_ok":
+                    raise RuntimeError("Home Assistant refused the token")
+                await ws.send_json(
+                    {"id": 1, "type": "subscribe_events", "event_type": event_type}
+                )
+                async for msg in ws:
+                    if msg.type is aiohttp.WSMsgType.TEXT:
+                        data = json.loads(msg.data)
+                        if data.get("type") == "event":
+                            yield data["event"]["data"]
+        except Exception:
+            logger.warning(
+                "lost the %s subscription; retrying", event_type, exc_info=True
+            )
+        await asyncio.sleep(10)
