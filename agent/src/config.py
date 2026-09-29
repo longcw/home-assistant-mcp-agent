@@ -44,6 +44,12 @@ class Settings:
     # Home Assistant base URL and long-lived token.
     ha_url: str
     ha_token: str
+    # Parallel Search MCP endpoint (web_search / web_fetch); empty turns web search off.
+    web_search_url: str
+    # Parallel API key for higher limits; empty uses the anonymous free tier.
+    parallel_api_key: str
+    # Mem0 API key for long-term memory across conversations; empty turns memory off.
+    mem0_api_key: str
     # Port of the agent server's HTTP app, which serves the text chat endpoints.
     http_port: int
     # Bearer token for the text chat endpoints; empty leaves them unmounted.
@@ -85,6 +91,9 @@ def load_settings() -> Settings:
         agent_tz=os.getenv("AGENT_TZ") or os.getenv("TZ") or "UTC",
         ha_url=os.getenv("HA_URL", ""),
         ha_token=os.getenv("HA_TOKEN", ""),
+        web_search_url=os.getenv("WEB_SEARCH_URL", "https://search.parallel.ai/mcp"),
+        parallel_api_key=os.getenv("PARALLEL_API_KEY", ""),
+        mem0_api_key=os.getenv("MEM0_API_KEY", ""),
         http_port=int(os.getenv("HTTP_PORT", "8081")),
         text_api_token=os.getenv("TEXT_API_TOKEN", ""),
         text_data_dir=os.getenv("TEXT_DATA_DIR", "/data"),
@@ -105,6 +114,8 @@ settings = load_settings()
 # --- Fixed protocol constants (not env-configurable) ---
 # HA's MCP Server integration exposes Streamable HTTP at /api/mcp.
 MCP_PATH = "/api/mcp"
+# Mem0's hosted MCP server; each person's memories are their own user scope there.
+MEM0_MCP_URL = "https://mcp.mem0.ai/mcp"
 # HA tool returning the live state of all exposed entities.
 LIVE_CONTEXT_TOOL = "GetLiveContext"
 # Data-channel topic carrying the tool-execution lifecycle: powers the frontend's tool

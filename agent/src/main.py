@@ -140,7 +140,8 @@ async def run_scheduled_task(ctx: JobContext, meta: dict[str, Any]) -> None:
     logger.info("running scheduled task %s (run %s): %s", task_id, run_id, description)
 
     await ctx.connect()
-    agent = HomeAssistantAgent()
+    user = meta.get("user")
+    agent = HomeAssistantAgent(user=user)
     instruction = execution.get("instruction")
     status = "success"
     result = ""
@@ -169,7 +170,7 @@ async def run_scheduled_task(ctx: JobContext, meta: dict[str, Any]) -> None:
     # send_notification) shouldn't also get a "task done" notification on top.
     self_notified = any(s.tool == "send_notification" for s in steps)
     if status == "error":
-        targets = await scheduler.notify_targets()
+        targets = await scheduler.notify_targets(user)
         message = f"{description}\n\nError: {result}".strip()
         await ha.notify(message, title="Scheduled task failed", targets=targets)
     elif not self_notified:
@@ -179,7 +180,7 @@ async def run_scheduled_task(ctx: JobContext, meta: dict[str, Any]) -> None:
             message = f"{description}\n\n{result}"
         else:
             message = description
-        targets = await scheduler.notify_targets()
+        targets = await scheduler.notify_targets(user)
         await ha.notify(message.strip(), title="Scheduled task done", targets=targets)
 
     try:
@@ -248,7 +249,9 @@ async def entrypoint(ctx: JobContext) -> None:
     turn_detector = inference.TurnDetector()
     stt = inference.STT(settings.stt_model, language=settings.stt_language)
 
-    agent = HomeAssistantAgent()
+    # the integration names the HA login that asked for this session
+    user = await scheduler.resolve_user(ha_user_id=meta.get("ha_user_id"))
+    agent = HomeAssistantAgent(user=user)
     session = AgentSession(
         stt=stt,
         llm=inference.LLM(settings.llm_model),

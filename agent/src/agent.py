@@ -1,5 +1,7 @@
 """The HomeAssistantAgent: HA MCP tools, live-state helpers, and scheduling tools."""
 
+import asyncio
+import copy
 import json
 import logging
 import time
@@ -12,15 +14,18 @@ from livekit.agents import Agent, ModelSettings, mcp
 from livekit.agents.llm import (
     ChatContext,
     ChatMessage,
+    RawFunctionTool,
+    Tool,
     ToolContext,
     ToolError,
+    Toolset,
     function_tool,
 )
 from pydantic import BaseModel, Field
 
 import ha
 import scheduler_client as scheduler
-from config import LIVE_CONTEXT_TOOL, settings
+from config import LIVE_CONTEXT_TOOL, MEM0_MCP_URL, settings
 from utils import current_time_text, to_aware_iso
 
 logger = logging.getLogger("ha-mcp-agent")
@@ -54,6 +59,51 @@ def load_instructions() -> str:
     return instructions.strip()
 
 
+# Mem0 scope arguments; a person's memory toolset sets them, so the LLM never does
+_MEMORY_SCOPE = ("user_id", "agent_id", "app_id", "run_id")
+
+
+class PersonalMemory(mcp.MCPToolset):
+    """Mem0's tools pinned to one person, so no one reaches another's memories."""
+
+    def __init__(self, *, user: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._user = user
+        self._pinned: Any = None
+
+    async def setup(self, *, reload: bool = False) -> "PersonalMemory":
+        await super().setup(reload=reload)
+        # setup() is a no-op once connected; re-pin only a freshly fetched tool list
+        if self._tools is not self._pinned:
+            self._tools = self._pinned = [self._pin(t) for t in self._tools]
+        return self
+
+    def _pin(self, tool: Any) -> Any:
+        if not isinstance(tool, RawFunctionTool):
+            return tool
+        schema = copy.deepcopy(tool.info.raw_schema)
+        params = schema["parameters"]
+        props = params.get("properties", {})
+        for key in _MEMORY_SCOPE:
+            props.pop(key, None)
+        if "required" in params:
+            params["required"] = [r for r in params["required"] if r in props]
+        name, user = tool.info.name, self._user
+
+        async def call(raw_arguments: dict[str, Any]) -> Any:
+            args = {k: v for k, v in raw_arguments.items() if k not in _MEMORY_SCOPE}
+            if name == "add_memory":
+                args["user_id"] = user
+            elif "filters" in props:
+                given = args.get("filters")
+                args["filters"] = {
+                    "AND": [{"user_id": user}, *([given] if given else [])]
+                }
+            return await tool(args)
+
+        return function_tool(call, raw_schema=schema, flags=tool.info.flags)
+
+
 class HomeAssistantAgent(Agent):
     """A LiveKit agent that controls Home Assistant via its native MCP server.
 
@@ -63,18 +113,55 @@ class HomeAssistantAgent(Agent):
     tools defer actions to the scheduler service.
     """
 
-    def __init__(self) -> None:
-        toolset = mcp.MCPToolset(
-            id="home-assistant",
-            mcp_server=mcp.MCPServerHTTP(
-                url=ha.mcp_url(),
-                headers={"Authorization": f"Bearer {settings.ha_token}"},
+    def __init__(self, user: str | None = None) -> None:
+        tools: list[Tool | Toolset] = [
+            mcp.MCPToolset(
+                id="home-assistant",
+                mcp_server=mcp.MCPServerHTTP(
+                    url=ha.mcp_url(),
+                    headers={"Authorization": f"Bearer {settings.ha_token}"},
+                    tool_result_resolver=ha.text_result_resolver,
+                ),
+            )
+        ]
+        if settings.web_search_url:
+            key = settings.parallel_api_key
+            web_search_mcp = mcp.MCPToolset(
+                id="web-search",
+                mcp_server=mcp.MCPServerHTTP(
+                    url=settings.web_search_url,
+                    headers={"Authorization": f"Bearer {key}"} if key else None,
+                    tool_result_resolver=ha.text_result_resolver,
+                ),
+            )
+            tools.append(web_search_mcp)
+        if settings.mem0_api_key:
+            memory_server = mcp.MCPServerHTTP(
+                url=MEM0_MCP_URL,
+                headers={"Authorization": f"Bearer {settings.mem0_api_key}"},
+                # mem0 routinely takes 3-4 s to list tools, past the 5 s default
+                # under load, and a failed setup leaves the session without memory
+                client_session_timeout_seconds=20,
+                # bulk deletes and event bookkeeping stay out of the LLM's reach
+                allowed_tools=[
+                    "add_memory",
+                    "search_memories",
+                    "get_memories",
+                    "update_memory",
+                    "delete_memory",
+                ],
                 tool_result_resolver=ha.text_result_resolver,
-            ),
-        )
-        super().__init__(instructions=load_instructions(), tools=[toolset])
+            )
+            # no one in particular shares Mem0's default user scope
+            tools.append(
+                PersonalMemory(id="memory", mcp_server=memory_server, user=user)
+                if user
+                else mcp.MCPToolset(id="memory", mcp_server=memory_server)
+            )
 
-        self._mcp_toolset = toolset
+        super().__init__(instructions=load_instructions(), tools=tools)
+        # the person this session speaks for (casefolded), or None for no one
+        self.user = user
         self._devices: pd.DataFrame | None = None
         self._devices_updated_at: float = 0
         self._devices_timeout_interval = 30
@@ -100,8 +187,11 @@ class HomeAssistantAgent(Agent):
         return Agent.default.llm_node(self, chat_ctx, tools, model_settings)
 
     async def tool_context(self) -> ToolContext:
-        """All callable tools (agent function tools + HA MCP tools) in one context."""
-        await self._mcp_toolset.setup()  # no-op if already connected
+        """All callable tools in one context, with every toolset connected."""
+        # scheduled steps replay tools without a session, so nothing else connects the
+        # MCP toolsets there; setup() is a no-op once connected.
+        toolsets = [t for t in self.tools if isinstance(t, Toolset)]
+        await asyncio.gather(*(t.setup() for t in toolsets), return_exceptions=True)
         return ToolContext(self.tools)
 
     @function_tool
@@ -177,7 +267,7 @@ class HomeAssistantAgent(Agent):
             title: Optional short title.
         """
         logger.info("send_notification: %s", message)
-        targets = await scheduler.notify_targets()
+        targets = await scheduler.notify_targets(self.user)
         ok = await ha.notify(message, title=title, targets=targets)
         return "Notification sent." if ok else "Failed to send the notification."
 
@@ -263,7 +353,8 @@ class HomeAssistantAgent(Agent):
                     "description": description,
                     "schedule": schedule,
                     "execution": execution,
-                }
+                },
+                self.user,
             )
         except Exception as exc:  # noqa: BLE001 - surface a message for the LLM to relay
             logger.exception("schedule_task failed")
@@ -276,7 +367,7 @@ class HomeAssistantAgent(Agent):
         """List the currently scheduled (active) tasks, soonest first."""
         logger.info("list_scheduled_tasks")
         try:
-            tasks = await scheduler.list_tasks(active_only=True)
+            tasks = await scheduler.list_tasks(self.user, active_only=True)
         except Exception as exc:  # noqa: BLE001
             logger.exception("list_scheduled_tasks failed")
             raise ToolError(f"could not list scheduled tasks: {exc}") from exc
@@ -288,7 +379,7 @@ class HomeAssistantAgent(Agent):
         list_scheduled_tasks)."""
         logger.info("cancel_scheduled_task: %s", task_id)
         try:
-            task = await scheduler.delete_task(task_id)
+            task = await scheduler.delete_task(task_id, self.user)
         except Exception as exc:  # noqa: BLE001
             logger.exception("cancel_scheduled_task failed")
             raise ToolError(f"could not cancel task: {exc}") from exc
@@ -326,7 +417,7 @@ class HomeAssistantAgent(Agent):
                 }
             if not payload:
                 raise ToolError("nothing to update.")
-            task = await scheduler.update_task(task_id, payload)
+            task = await scheduler.update_task(task_id, payload, self.user)
             return json.dumps(task, ensure_ascii=False)
         except ToolError:
             raise

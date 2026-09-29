@@ -73,6 +73,8 @@ The agent calls `load_dotenv()`, which walks up to the repo-root `.env`.
 | --- | --- |
 | `HA_URL` | Home Assistant base URL. `/api/mcp` is appended automatically. |
 | `HA_TOKEN` | Home Assistant long-lived access token (sent as a bearer token). |
+| `PARALLEL_API_KEY` | Optional [Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp) key for web search; the anonymous free tier works without one. `WEB_SEARCH_URL=` (empty) turns web search off. |
+| `MEM0_API_KEY` | Optional [Mem0](https://docs.mem0.ai/platform/mem0-mcp) key; set, the agent remembers preferences across conversations through Mem0's hosted MCP server. |
 | `AGENT_NAME` | Explicit-dispatch worker name (default `ha-agent`). Must match the integration's **Agent name**. |
 | `STT_IDLE_TIMEOUT` | Seconds after the mic is gated before STT is torn down to save cost (default `120`). |
 | `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | Your LiveKit server. |

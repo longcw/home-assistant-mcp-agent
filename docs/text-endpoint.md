@@ -10,13 +10,14 @@ Text runs on the **draft** session-persistence API of livekit-agents ([livekit/a
 curl -X POST http://192.168.100.121:8952/chat \
      -H "Authorization: Bearer $TEXT_API_TOKEN" \
      -H 'content-type: application/json' \
-     -d '{"text": "客厅的灯开着吗？"}'
+     -d '{"text": "客厅的灯开着吗？", "user": "alice"}'
 ```
 
-- The body is either JSON `{"text": "...", "new": false, "steps": true}` or plain text. `?new=1` and `?steps=0` work too.
+- The body is either JSON `{"text": "...", "new": false, "steps": true, "user": "..."}` or plain text. `?new=1`, `?steps=0` and `?user=` work too.
+- `user` names the family member speaking; the name is matched without regard to case. Each person has their own conversation and Mem0 memories, and gets notifications and phone progress on the devices ticked for them under People in the card's Settings tab (progress goes to the first ticked phone). A name not listed there still gets its own conversation and memories, with the default devices for notifications and no phone progress. Without `user` the request is no one in particular: the conversation, memories and `TEXT_LIVE_ACTIVITY` phone from before there were people. Through the HA integration (the card's Text tab) the HA login stands in for the name, once a person is linked to it.
 - The reply is plain text: one line per tool call the turn made (`→ HassTurnOn({"name": "客厅 灯"})`, plus `  … ` lines for a tool's progress reports), a blank line, then the agent's answer. `"steps": false` returns the answer alone, which suits *Speak Text*. A turn that started a new conversation begins with `(new conversation)`. The `X-Conversation-Id` header names the conversation.
 - The reply comes back whole, not streamed: an iPhone Shortcut's *Get Contents of URL* waits for the full body, so streamed output would show no sooner there. The step lines are how a turn's work is shown, and the phone progress below is how it is shown while it runs.
-- Requests go into one conversation, so the agent remembers earlier turns, across restarts too, until a new one is asked for: `"new": true`, or the new-conversation button on the card's Text tab (with no `text` it only starts the new one). Setting `TEXT_RENEW_AFTER` to a number of seconds also starts one on its own after that long without a request; it is off by default.
+- A person's requests go into one conversation, so the agent remembers earlier turns, across restarts too, until a new one is asked for: `"new": true`, or the new-conversation button on the card's Text tab (with no `text` it only starts the new one). Setting `TEXT_RENEW_AFTER` to a number of seconds also starts one on its own after that long without a request; it is off by default.
 - A loaded conversation keeps only its latest `TEXT_MAX_ITEMS` (100) chat items in the agent's context, cut with `ChatContext.truncate()` each time it loads. The session's own history, which the model never reads and the Text tab shows, is not cut; it grows by a few items per turn until a new conversation starts.
 - A reply is capped at `TEXT_REPLY_TIMEOUT` (80 s), under the reverse proxy's 90 s read timeout. A turn that runs out is cancelled and returns whatever the agent had said so far.
 - Both endpoints need `TEXT_API_TOKEN` as a bearer token; with it unset, neither is mounted.
@@ -52,10 +53,10 @@ The answer notification carries buttons: each quick reply the agent offered with
 `scripts/make_shortcut.py` builds a signed `.shortcut` file to import (it needs a Mac, for the `shortcuts sign` CLI):
 
 ```bash
-uv run --no-project python scripts/make_shortcut.py -o "Ask Home.shortcut" --token "$TEXT_API_TOKEN"
+uv run --no-project python scripts/make_shortcut.py -o "Ask Home.shortcut" --token "$TEXT_API_TOKEN" --user alice
 ```
 
-AirDrop the file to the iPhone, or open it on a Mac signed in to the same iCloud account, and import it. The import asks for the URL and the token, prefilled with `--url` (default `http://192.168.100.121:8952/chat`, reachable at home or over Tailscale) and `--token`. Without `--token` the file holds no secret and can be shared. The text it sends is its Shortcut Input, and the reply (tool calls, then the answer) is its output. From another shortcut: *Dictate Text* → *Run Shortcut* "Ask Home" with the dictated text as input → *Show Result* on its output. Run on its own, it asks for the text and shows the reply.
+AirDrop the file to the iPhone, or open it on a Mac signed in to the same iCloud account, and import it. The import asks for the URL, the token and the person's name, prefilled with `--url` (default `http://192.168.100.121:8952/chat`, reachable at home or over Tailscale), `--token` and `--user`. The name is sent as `user` on every request; left empty, the shortcut talks as no one in particular. Without `--token` the file holds no secret and can be shared, so one file serves the whole family, each person typing their own name on import. The text it sends is its Shortcut Input, and the reply (tool calls, then the answer) is its output. From another shortcut: *Dictate Text* → *Run Shortcut* "Ask Home" with the dictated text as input → *Show Result* on its output. Run on its own, it asks for the text and shows the reply.
 
 ## How it works
 

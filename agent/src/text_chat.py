@@ -15,14 +15,16 @@ import logging
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from livekit.agents import AgentServer, AgentSession, inference
-from livekit.agents.a2a import A2AClient, A2ASessionContext, TaskInput
+from livekit.agents.a2a import A2AClient, A2ASessionContext, TaskInput, TaskStream
 from livekit.agents.store import LocalStore, StoreError
 
 import ha
+import scheduler_client as scheduler
 from agent import HomeAssistantAgent
 from config import settings
 
@@ -32,22 +34,29 @@ A2A_ENDPOINT = "home-assistant"
 CHAT_PATH = "/chat"
 
 _data_dir = Path(settings.text_data_dir)
-_current_file = _data_dir / "current_conversation"
 
 # one SQLite file per conversation; handed to AgentServer(store=...) in main.py
 store = LocalStore(_data_dir / "sessions")
 # the sessions the A2A endpoint has loaded, by conversation, for the history view
 _live: dict[str, AgentSession] = {}
-# what the agent's suggest_replies offered in the running turn
-_suggested: list[str] = []
+# what the agent's suggest_replies offered in each conversation's running turn
+_suggested: dict[str, list[str]] = {}
+# the person each conversation belongs to, for the A2A endpoint's agent
+_owners: dict[str, str | None] = {}
 
 
 class _Conversation:
-    """The one conversation the bridge talks in, kept until renewed or left idle."""
+    """One person's conversation, kept until renewed or left idle."""
 
-    def __init__(self, url: str, headers: dict[str, str]) -> None:
+    def __init__(self, url: str, headers: dict[str, str], user: str | None) -> None:
         self._url = url
         self._headers = headers
+        self._user = user
+        # no one in particular keeps the file from before there were people
+        name = "current_conversation"
+        self._current_file = _data_dir / (
+            f"{name}.{quote(user, safe='')}" if user else name
+        )
         self._client: A2AClient | None = None
         self._conversation_id: str | None = None
         self._lock = asyncio.Lock()
@@ -57,14 +66,17 @@ class _Conversation:
         self._reply_action = ""
         self._listener: asyncio.Task[None] | None = None
         self._tapped: set[asyncio.Task[object]] = set()
+        # the running turn, for cancel(); its task id is set by its first event
+        self._stream: TaskStream | None = None
+        self._stopping = False
 
     async def _open(self, renew: bool) -> tuple[A2AClient, str, bool]:
         """The client for this turn, its conversation, and whether that one is new."""
-        if self._conversation_id is None and _current_file.exists():
-            self._conversation_id = _current_file.read_text().strip() or None
+        if self._conversation_id is None and self._current_file.exists():
+            self._conversation_id = self._current_file.read_text().strip() or None
         if self._conversation_id is not None and settings.text_renew_after > 0:
             # touched on every turn, so the file's age is how long the user was away
-            idle = time.time() - _current_file.stat().st_mtime
+            idle = time.time() - self._current_file.stat().st_mtime
             renew = renew or idle > settings.text_renew_after
         if renew and self._client is not None:
             # the goodbye closes the old context on the server, which saves it
@@ -73,10 +85,11 @@ class _Conversation:
         started = renew or self._conversation_id is None
         if started:
             self._conversation_id = await store.create_database()
-            _current_file.write_text(self._conversation_id)
+            self._current_file.write_text(self._conversation_id)
             logger.info("started text conversation %s", self._conversation_id)
         assert self._conversation_id is not None
-        _current_file.touch()
+        _owners[self._conversation_id] = self._user
+        self._current_file.touch()
         if self._client is None:
             # the agent is the only one in the conversation, so its session is the front
             # session and the conversation id doubles as the A2A context id
@@ -96,10 +109,12 @@ class _Conversation:
             client, conversation_id, started = await self._open(renew)
             if not text:
                 return conversation_id, "Started a new conversation."
-            live = self._progress if settings.text_live_activity else None
+            suggested = _suggested.setdefault(conversation_id, [])
+            suggested.clear()
+            self._progress.target = await scheduler.phone(self._user)
+            live = self._progress if self._progress.target else None
             if live:
                 live.begin(text)
-                _suggested.clear()
                 if self._listener is None or self._listener.done():
                     self._listener = asyncio.create_task(self._listen())
             lines = ["(new conversation)"] if steps and started else []
@@ -107,6 +122,7 @@ class _Conversation:
             answer, ok = "", True
             task_input = TaskInput(text=text, conversation_id=conversation_id)
             async with client.send(task_input) as stream:
+                self._stream, self._stopping = stream, False
                 try:
                     async with asyncio.timeout(settings.text_reply_timeout):
                         async for update in stream:
@@ -135,14 +151,21 @@ class _Conversation:
                                 if update.state in ("failed", "canceled"):
                                     answer, ok = f"[{update.state}] {answer}", False
                                 break
+                        else:
+                            # a cancelled task can close its stream with no last word
+                            state = "canceled" if self._stopping else "ended"
+                            answer = "\n".join([f"[{state}]", *said])
+                            ok = False
                 except TimeoutError:
                     await stream.cancel("the text client stopped waiting")
                     answer = "\n".join(["[timeout] still working", *said])
                     ok = False
+                finally:
+                    self._stream = None
             if live:
                 # the suggested replies become buttons, and Reply takes free text
                 nonce = uuid.uuid4().hex[:8]
-                replies = list(dict.fromkeys(_suggested))[:4]
+                replies = list(dict.fromkeys(suggested))[:4]
                 self._actions = {
                     f"HATEXT_{nonce}_{i}": r for i, r in enumerate(replies)
                 }
@@ -168,6 +191,17 @@ class _Conversation:
                 lines.append("")
             return conversation_id, "\n".join([*lines, answer])
 
+    async def cancel(self, task_id: str | None) -> bool:
+        """Stop the running turn; naming its task never stops a newer one."""
+        stream = self._stream
+        if stream is None or not stream.task_id:
+            return False
+        if task_id and task_id != stream.task_id:
+            return False
+        self._stopping = True
+        await stream.cancel("stopped by the user")
+        return True
+
     async def _listen(self) -> None:
         """Send a tap on the latest answer's buttons into the conversation."""
         async for event in ha.subscribe("mobile_app_notification_action"):
@@ -186,8 +220,8 @@ class _Conversation:
         """The current conversation's latest ``limit`` messages and tool calls, shaped
         like the card's conversation items."""
         conversation_id = self._conversation_id
-        if conversation_id is None and _current_file.exists():
-            conversation_id = _current_file.read_text().strip() or None
+        if conversation_id is None and self._current_file.exists():
+            conversation_id = self._current_file.read_text().strip() or None
         items = []
         if conversation_id and (session := _live.get(conversation_id)) is not None:
             items = list(session.history.items)
@@ -248,6 +282,8 @@ class _Conversation:
         return {
             "conversation_id": conversation_id,
             "busy": self._lock.locked(),
+            # the running turn's task, which POST /chat/cancel takes
+            "task_id": self._stream.task_id or None if self._stream else None,
             "items": shown[-limit:],
             "suggestions": suggestions,
         }
@@ -268,6 +304,8 @@ class _PhoneProgress:
     TAG = "ha-text"
 
     def __init__(self) -> None:
+        # the notify service of the phone showing it, set before each turn
+        self.target = ""
         self._activity = settings.text_live_mode == "activity"
         self._question = ""
         self._steps: list[str] = []
@@ -342,7 +380,7 @@ class _PhoneProgress:
     ) -> None:
         body: dict[str, object] = {
             "phase": phase,
-            "target": settings.text_live_activity,
+            "target": self.target,
             "tag": self.TAG,
             "message": message,
             "status": status,
@@ -386,7 +424,7 @@ class _PhoneProgress:
                 await ha.progress(item)
             else:
                 message, title, data = item
-                await ha.push(settings.text_live_activity, message, data, title=title)
+                await ha.push(self.target, message, data, title=title)
 
 
 def mount(server: AgentServer) -> None:
@@ -405,22 +443,37 @@ def mount(server: AgentServer) -> None:
                 return PlainTextResponse("unauthorized", status_code=401)
         return await call_next(request)
 
-    conversation = _Conversation(
-        f"http://127.0.0.1:{settings.http_port}/{A2A_ENDPOINT}",
-        headers={"Authorization": f"Bearer {token}"},
-    )
+    conversations: dict[str | None, _Conversation] = {}
+
+    async def conversation_for(name: object, ha_user_id: object) -> _Conversation:
+        """The conversation of the person a request names, or its HA login's."""
+        user = await scheduler.resolve_user(
+            str(name) if name else None, str(ha_user_id) if ha_user_id else None
+        )
+        if user not in conversations:
+            conversations[user] = _Conversation(
+                f"http://127.0.0.1:{settings.http_port}/{A2A_ENDPOINT}",
+                headers={"Authorization": f"Bearer {token}"},
+                user=user,
+            )
+        return conversations[user]
 
     @server.http.post(CHAT_PATH)
     async def chat(request: Request) -> Response:
-        """Take `{"text", "new", "steps"}` JSON or plain text; reply in plain text."""
+        """Take `{"text", "new", "steps", "user"}` JSON or plain text; reply in text."""
         body = (await request.body()).decode().strip()
         text, renew, steps = body, False, True
+        data: dict[str, object] = {}
         if request.headers.get("content-type", "").startswith("application/json"):
             data = json.loads(body or "{}")
             text = str(data.get("text") or "").strip()
             renew = bool(data.get("new"))
             steps = bool(data.get("steps", True))
         query = request.query_params
+        conversation = await conversation_for(
+            data.get("user") or query.get("user"),
+            data.get("ha_user_id") or query.get("ha_user_id"),
+        )
         renew = renew or query.get("new", "") in ("1", "true", "yes")
         steps = steps and query.get("steps", "") not in ("0", "false", "no")
         if not text and not renew:
@@ -435,9 +488,21 @@ def mount(server: AgentServer) -> None:
         return PlainTextResponse(reply, headers={"X-Conversation-Id": conversation_id})
 
     @server.http.get(f"{CHAT_PATH}/history")
-    async def chat_history(limit: int = 200) -> JSONResponse:
-        """The current conversation for a UI to render; `busy` while a turn runs."""
+    async def chat_history(
+        limit: int = 200, user: str = "", ha_user_id: str = ""
+    ) -> JSONResponse:
+        """A person's current conversation for a UI; `busy` while a turn runs."""
+        conversation = await conversation_for(user, ha_user_id)
         return JSONResponse(await conversation.history(limit))
+
+    @server.http.post(f"{CHAT_PATH}/cancel")
+    async def chat_cancel(request: Request) -> JSONResponse:
+        """Stop a person's running turn: `{"task_id", "user"}`, task from history."""
+        body = (await request.body()).decode().strip()
+        data = json.loads(body or "{}")
+        conversation = await conversation_for(data.get("user"), data.get("ha_user_id"))
+        task_id = str(data.get("task_id") or "") or None
+        return JSONResponse({"cancelled": await conversation.cancel(task_id)})
 
     # after the routes above: the A2A binding mounts a catch-all that shadows later ones
     @server.a2a_session(
@@ -447,8 +512,9 @@ def mount(server: AgentServer) -> None:
     )
     async def serve(ctx: A2ASessionContext) -> None:
         session = AgentSession(llm=inference.LLM(settings.llm_model), max_tool_steps=8)
-        agent = HomeAssistantAgent()
-        agent._suggest_replies_cb = lambda replies: _suggested.extend(replies)
+        agent = HomeAssistantAgent(user=_owners.get(ctx.context_id))
+        suggested = _suggested.setdefault(ctx.context_id, [])
+        agent._suggest_replies_cb = suggested.extend
         # None when the caller names no conversation, which then lives in memory only
         await session.start(agent=agent, persist=ctx.persisted)
         _live[ctx.context_id] = session

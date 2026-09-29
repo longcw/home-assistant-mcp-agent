@@ -3,9 +3,12 @@
 Run on a Mac (signing uses the `shortcuts` CLI):
 
     uv run --no-project python scripts/make_shortcut.py -o "Ask Home.shortcut" \\
-        [--url URL] [--token TOKEN]
+        [--url URL] [--token TOKEN] [--user NAME]
 
-The URL and token are asked for on import, prefilled with what is given here. The text
+The URL, token and the person's name are asked for on import, prefilled with what is
+given here. The name keeps each family member's conversation, memories and phone
+apart: it matches a person in the card's Settings tab, and left empty the shortcut
+talks as no one in particular. The text
 to send is the shortcut's input: another shortcut passes it with Run Shortcut (after
 Dictate Text, say) and gets the reply back as output; run on its own, it asks for text
 and shows the reply.
@@ -52,8 +55,8 @@ def dictionary(items: dict[str, dict]) -> dict:
     }
 
 
-def build(url: str, token: str) -> dict:
-    url_id, token_id, get_id = (str(uuid.uuid4()).upper() for _ in range(3))
+def build(url: str, token: str, user: str) -> dict:
+    url_id, token_id, user_id, get_id = (str(uuid.uuid4()).upper() for _ in range(4))
     actions = [
         {
             "WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
@@ -62,6 +65,10 @@ def build(url: str, token: str) -> dict:
         {
             "WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
             "WFWorkflowActionParameters": {"UUID": token_id, "WFTextActionText": token},
+        },
+        {
+            "WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
+            "WFWorkflowActionParameters": {"UUID": user_id, "WFTextActionText": user},
         },
         {
             "WFWorkflowActionIdentifier": "is.workflow.actions.downloadurl",
@@ -74,7 +81,12 @@ def build(url: str, token: str) -> dict:
                     {"Authorization": text(f"Bearer {OBJ}", output(token_id, "Text"))}
                 ),
                 "WFHTTPBodyType": "JSON",
-                "WFJSONValues": dictionary({"text": text(OBJ, SHORTCUT_INPUT)}),
+                "WFJSONValues": dictionary(
+                    {
+                        "text": text(OBJ, SHORTCUT_INPUT),
+                        "user": text(OBJ, output(user_id, "Text")),
+                    }
+                ),
             },
         },
         {
@@ -109,6 +121,12 @@ def build(url: str, token: str) -> dict:
                 "DefaultValue": token,
                 "Text": "TEXT_API_TOKEN from the server's .env",
             },
+            {
+                **question,
+                "ActionIndex": 2,
+                "DefaultValue": user,
+                "Text": "Your name, as listed under People in the card's Settings tab",
+            },
         ],
         "WFWorkflowInputContentItemClasses": ["WFStringContentItem"],
         "WFWorkflowNoInputBehavior": {
@@ -127,11 +145,12 @@ def main() -> None:
     parser.add_argument("-o", "--output", default="Ask Home.shortcut")
     parser.add_argument("--url", default="http://192.168.100.121:8952/chat")
     parser.add_argument("--token", default="")
+    parser.add_argument("--user", default="")
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory() as tmp:
         unsigned = Path(tmp) / "unsigned.shortcut"
-        unsigned.write_bytes(plistlib.dumps(build(args.url, args.token)))
+        unsigned.write_bytes(plistlib.dumps(build(args.url, args.token, args.user)))
         subprocess.run(
             [
                 "shortcuts",
