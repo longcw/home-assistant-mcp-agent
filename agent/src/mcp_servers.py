@@ -8,6 +8,7 @@ whose variable is unset is left out.
 from __future__ import annotations
 
 import copy
+import inspect
 import logging
 import os
 import re
@@ -16,8 +17,8 @@ from typing import Any
 from urllib.parse import quote
 
 import yaml
-from livekit.agents import mcp
-from livekit.agents.llm import RawFunctionTool, Toolset, function_tool
+from livekit.agents import RunContext, mcp
+from livekit.agents.llm import RawFunctionTool, ToolFlag, Toolset, function_tool
 
 import ha
 import scheduler_client as scheduler
@@ -87,19 +88,65 @@ class PersonalMemory(mcp.MCPToolset):
         return function_tool(call, raw_schema=schema, flags=tool.info.flags)
 
 
-class Restricted(mcp.MCPToolset):
-    """A server offered only to a person whose Settings-tab entry lists it."""
+class Guarded(mcp.MCPToolset):
+    """A server whose tools a person may not be offered, or may have to confirm.
 
-    def __init__(self, *, user: str, **kwargs: Any) -> None:
+    With ``user``, it connects only for a person whose Settings-tab entry lists it. A
+    tool in ``confirm`` runs only when called again after the person has spoken since
+    its first call, which answers with a request to ask them.
+    """
+
+    def __init__(self, *, user: str | None, confirm: list[str], **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._user = user
-        self._allowed: bool | None = None
+        self._allowed: bool | None = None if user else True
+        self._confirm = set(confirm)
+        self._guarded: Any = None
+        # tool name -> the person's latest message when it was first called
+        self._asked: dict[str, str] = {}
 
-    async def setup(self, *, reload: bool = False) -> Restricted:
+    async def setup(self, *, reload: bool = False) -> Guarded:
         if self._allowed is None:
             self._allowed = await scheduler.allows_server(self._user, self.id)
         # left unconnected, the toolset has no tools, so the LLM never sees them
-        return await super().setup(reload=reload) if self._allowed else self
+        if not self._allowed:
+            return self
+        await super().setup(reload=reload)
+        # setup() is a no-op once connected; wrap only a freshly fetched tool list
+        if self._confirm and self._tools is not self._guarded:
+            self._tools = self._guarded = [self._guard(t) for t in self._tools]
+        return self
+
+    def _guard(self, tool: Any) -> Any:
+        if not isinstance(tool, RawFunctionTool) or tool.info.name not in self._confirm:
+            return tool
+        name = tool.info.name
+        # a tool that reports progress takes the run context before its arguments
+        takes_ctx = len(inspect.signature(tool).parameters) > 1
+
+        async def call(ctx: RunContext, raw_arguments: dict[str, Any]) -> Any:
+            said = next(
+                (
+                    i.id
+                    for i in reversed(ctx.session.history.items)
+                    if i.type == "message" and i.role == "user"
+                ),
+                "",
+            )
+            if self._asked.get(name, said) != said:
+                self._asked.pop(name)
+                return await (
+                    tool(ctx, raw_arguments) if takes_ctx else tool(raw_arguments)
+                )
+            self._asked[name] = said
+            return (
+                f"Not done yet: {name} needs the person's yes first. Say what it will "
+                "do and ask them. If they agree in their next message, call it again."
+            )
+
+        return function_tool(
+            call, raw_schema=tool.info.raw_schema, flags=tool.info.flags
+        )
 
 
 # per-person adapters an entry's ``per_person`` names
@@ -133,21 +180,26 @@ def _toolset(entry: dict[str, Any], user: str | None) -> Toolset | None:
             allowed_tools=entry.get("allowed_tools"),
             tool_result_resolver=ha.text_result_resolver,
         ),
+        # a tool that reports progress runs on in the background, where a force stop
+        # is the only thing that ends it
         "tool_options": {
-            name: mcp.MCPToolOptions(report_progress=True)
+            name: mcp.MCPToolOptions(report_progress=True, flags=ToolFlag.CANCELLABLE)
             for name in entry.get("report_progress") or []
         },
     }
     adapter = entry.get("per_person")
     if adapter and adapter not in _PER_PERSON:
         raise ValueError(f"mcp server {server_id!r}: unknown per_person {adapter!r}")
-    if adapter and restricted:
-        raise ValueError(f"mcp server {server_id!r}: per_person cannot be restricted")
+    confirm = list(entry.get("confirm") or [])
+    if adapter and (restricted or confirm):
+        raise ValueError(
+            f"mcp server {server_id!r}: per_person cannot be restricted or confirmed"
+        )
     # no one in particular gets the plain server, e.g. Mem0's default user scope
     if adapter and user:
         return _PER_PERSON[adapter](user=user, **kwargs)
-    if restricted:
-        return Restricted(user=user, **kwargs)
+    if restricted or confirm:
+        return Guarded(user=user if restricted else None, confirm=confirm, **kwargs)
     return mcp.MCPToolset(**kwargs)
 
 

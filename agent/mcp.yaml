@@ -13,9 +13,12 @@
 #   requires         variables that must be set, or the entry is skipped
 #   timeout          seconds for any one request to the server (default 5)
 #   allowed_tools    only these of the server's tools reach the LLM
-#   report_progress  tools that answer at once and report their result as a later update
+#   report_progress  tools that answer at once and report their result as a later update;
+#                    they run in the background, and only a force stop cancels them
 #   per_person       an adapter scoping the server to the person speaking (mem0)
 #   restricted       offered only to people whose Settings entry lists this id
+#   confirm          tools that run only once the person has spoken since the model first
+#                    called them, which answers by asking the model to get their yes
 #   callback         sends this agent's webhook as X-Callback-Url / X-Callback-Token, for
 #                    results that outlive a tool call (needs CALLBACK_BASE_URL and
 #                    TEXT_API_TOKEN)
@@ -50,4 +53,6 @@ servers:
     report_progress:
       [start_herdr_agent, watch_herdr_agent, prompt_herdr_agent, answer_herdr_permission]
     restricted: true
+    # the model tends to ask and act in one turn; these wait for the person's answer
+    confirm: [start_herdr_agent, answer_herdr_permission]
     callback: true
