@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ScheduleSpec(BaseModel):
@@ -63,6 +63,7 @@ class TaskCreate(BaseModel):
     description: str
     schedule: ScheduleSpec
     execution: ExecutionSpec
+    user: Optional[str] = None
 
 
 class TaskUpdate(BaseModel):
@@ -90,6 +91,7 @@ class TaskOut(BaseModel):
     status: str
     enabled: bool
     created_at: str
+    user: Optional[str] = None
     # The next fire instant (ISO). For recurring tasks this is APScheduler's computed next run.
     next_run_at: Optional[str] = None
     runs: list[RunOut] = Field(default_factory=list)
@@ -102,11 +104,36 @@ class RunReport(BaseModel):
     result: Optional[str] = None
 
 
+class UserSettings(BaseModel):
+    """One person: the name their Shortcut sends, an optional HA login, their devices."""
+
+    name: str
+    ha_user_id: Optional[str] = None
+    notify_targets: list[str] = Field(default_factory=list)
+
+    @field_validator("name")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("user name is empty")
+        return v.strip()
+
+
 class SettingsOut(BaseModel):
     # notify.* services notifications are also pushed to (besides the always-on
-    # persistent_notification), e.g. ["mobile_app_iphone"].
+    # persistent_notification), e.g. ["mobile_app_iphone"], for anyone not in users.
     notify_targets: list[str] = Field(default_factory=list)
+    users: list[UserSettings] = Field(default_factory=list)
 
 
 class SettingsUpdate(BaseModel):
     notify_targets: Optional[list[str]] = None
+    users: Optional[list[UserSettings]] = None
+
+    @field_validator("users")
+    @classmethod
+    def _unique(cls, v: Optional[list[UserSettings]]) -> Optional[list[UserSettings]]:
+        names = [u.name.casefold() for u in v or []]
+        if len(names) != len(set(names)):
+            raise ValueError("user names must be unique")
+        return v

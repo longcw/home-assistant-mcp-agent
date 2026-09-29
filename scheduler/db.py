@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 from models import Base
@@ -25,7 +25,20 @@ def make_engine(db_path: str) -> Engine:
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(engine)
+    _add_missing_columns(engine)
     return engine
+
+
+def _add_missing_columns(engine: Engine) -> None:
+    """Add columns introduced after a database was created; create_all skips them."""
+    added = {"tasks": {"user": "VARCHAR(64)"}, "settings": {"users": "JSON"}}
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table, columns in added.items():
+            have = {c["name"] for c in insp.get_columns(table)}
+            for name, sql_type in columns.items():
+                if name not in have:
+                    conn.execute(text(f'ALTER TABLE {table} ADD COLUMN "{name}" {sql_type}'))
 
 
 def make_session_factory(engine: Engine) -> sessionmaker:

@@ -60,7 +60,21 @@ class SchedulerService:
 
     # --- public CRUD ---------------------------------------------------------------
 
-    def create_task(self, req: TaskCreate) -> TaskOut:
+    def owner(self, user: str | None, ha_user_id: str | None) -> str | None:
+        """The person a request acts for, as a casefolded name; None for no one.
+
+        A typed name is taken as given; an HA login counts only when a person in the
+        settings is linked to it.
+        """
+        if user and user.strip():
+            return user.strip().casefold()
+        if ha_user_id:
+            for person in self.get_settings().users:
+                if person.ha_user_id == ha_user_id:
+                    return person.name.casefold()
+        return None
+
+    def create_task(self, req: TaskCreate, owner: str | None = None) -> TaskOut:
         run_at_iso, cron = self._validate_schedule(req.schedule)
         with self._Session() as s:
             task = Task(
@@ -74,6 +88,7 @@ class SchedulerService:
                 status=ACTIVE,
                 enabled=True,
                 created_at=_utcnow_iso(),
+                user=owner or (req.user.strip().casefold() if req.user else None),
             )
             s.add(task)
             s.commit()
@@ -81,9 +96,14 @@ class SchedulerService:
             self._add_job(task)
             return self._to_out(task)
 
-    def list_tasks(self, active_only: bool = True) -> list[TaskOut]:
+    def list_tasks(
+        self, active_only: bool = True, owner: str | None = None
+    ) -> list[TaskOut]:
+        """One person's tasks; no one in particular sees the tasks no one owns."""
         with self._Session() as s:
-            stmt = select(Task)
+            stmt = select(Task).where(
+                Task.user == owner if owner else Task.user.is_(None)
+            )
             if active_only:
                 stmt = stmt.where(Task.status == ACTIVE)
             tasks = list(s.scalars(stmt))
@@ -92,15 +112,17 @@ class SchedulerService:
         out.sort(key=lambda t: (t.next_run_at is None, t.next_run_at or ""))
         return out
 
-    def get_task(self, task_id: str) -> TaskOut | None:
+    def get_task(self, task_id: str, owner: str | None = None) -> TaskOut | None:
         with self._Session() as s:
             task = s.get(Task, task_id)
-            return self._to_out(task) if task else None
+            return self._to_out(task) if task and task.user == owner else None
 
-    def update_task(self, task_id: str, req: TaskUpdate) -> TaskOut | None:
+    def update_task(
+        self, task_id: str, req: TaskUpdate, owner: str | None = None
+    ) -> TaskOut | None:
         with self._Session() as s:
             task = s.get(Task, task_id)
-            if task is None:
+            if task is None or task.user != owner:
                 return None
             if req.description is not None:
                 task.description = req.description
@@ -124,11 +146,11 @@ class SchedulerService:
                 self._add_job(task)
             return self._to_out(task)
 
-    def delete_task(self, task_id: str) -> TaskOut | None:
+    def delete_task(self, task_id: str, owner: str | None = None) -> TaskOut | None:
         """Hard-delete a task and its run history, and unschedule it."""
         with self._Session() as s:
             task = s.get(Task, task_id)
-            if task is None:
+            if task is None or task.user != owner:
                 return None
             out = self._to_out(task)  # snapshot before removal
             s.delete(task)  # runs cascade via the relationship
@@ -154,19 +176,24 @@ class SchedulerService:
             row = s.get(Settings, 1)
             # No row yet → default to the in-HA persistent notification being enabled.
             targets = list(row.notify_targets) if row else ["persistent_notification"]
-        return SettingsOut(notify_targets=targets)
+            users = list(row.users or []) if row else []
+        return SettingsOut(notify_targets=targets, users=users)
 
     def update_settings(self, req: SettingsUpdate) -> SettingsOut:
         with self._Session() as s:
             row = s.get(Settings, 1)
             if row is None:
-                row = Settings(id=1, notify_targets=[])
+                row = Settings(id=1, notify_targets=[], users=[])
                 s.add(row)
             if req.notify_targets is not None:
                 row.notify_targets = req.notify_targets
+            if req.users is not None:
+                row.users = [u.model_dump() for u in req.users]
             s.commit()
             s.refresh(row)
-            return SettingsOut(notify_targets=list(row.notify_targets))
+            return SettingsOut(
+                notify_targets=list(row.notify_targets), users=list(row.users or [])
+            )
 
     # --- firing --------------------------------------------------------------------
 
@@ -185,6 +212,7 @@ class SchedulerService:
                 task.status = "completed"
             description = task.description
             execution = dict(task.execution)
+            user = task.user
             s.commit()
 
         room = f"sched-{task_id[:8]}-{run_id[:8]}"
@@ -196,6 +224,7 @@ class SchedulerService:
                 execution=execution,
                 run_id=run_id,
                 room=room,
+                user=user,
             )
         except Exception as exc:  # noqa: BLE001 - dispatch failure is a run failure
             logger.exception("failed to dispatch task %s", task_id)
@@ -280,6 +309,7 @@ class SchedulerService:
             status=task.status,
             enabled=task.enabled,
             created_at=task.created_at,
+            user=task.user,
             next_run_at=self._next_run_at(task),
             # Most-recent runs only: bounds the payload so a long-lived recurring task's
             # history can't blow past the worker's tool-feed size budget (runs are asc).

@@ -33,6 +33,8 @@ class Task(Base):
     status: Mapped[str] = mapped_column(String(16), default="scheduled")
     enabled: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[str] = mapped_column(String(40))
+    # Person who scheduled it; their memories and devices are used when it fires.
+    user: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     runs: Mapped[list["Run"]] = relationship(
         back_populates="task",
@@ -49,6 +51,8 @@ class Settings(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     # notify.* services to also push notifications to, e.g. ["mobile_app_iphone"].
     notify_targets: Mapped[list] = mapped_column(JSON, default=list)
+    # People: [{"name", "ha_user_id", "notify_targets"}]; anyone else gets notify_targets.
+    users: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class Run(Base):

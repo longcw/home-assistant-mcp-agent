@@ -13,7 +13,14 @@ import service as service_module
 from config import Config
 from db import make_engine, make_session_factory
 from models import Task
-from schemas import ExecutionSpec, ScheduleSpec, TaskCreate, TaskUpdate
+from schemas import (
+    ExecutionSpec,
+    ScheduleSpec,
+    SettingsUpdate,
+    TaskCreate,
+    TaskUpdate,
+    UserSettings,
+)
 from service import SchedulerService
 
 
@@ -42,7 +49,9 @@ def test_create_once_task(tmp_path):
     out = svc.create_task(
         TaskCreate(
             description="turn off AC",
-            schedule=ScheduleSpec(type="once", run_at=future_iso(hours=1), timezone="UTC"),
+            schedule=ScheduleSpec(
+                type="once", run_at=future_iso(hours=1), timezone="UTC"
+            ),
             execution=ExecutionSpec(
                 steps=[{"tool": "HassTurnOff", "args": {"name": "AC"}}]
             ),
@@ -60,11 +69,16 @@ def test_create_multi_step_task(tmp_path):
     out = svc.create_task(
         TaskCreate(
             description="turn on the fan and set it to 50%",
-            schedule=ScheduleSpec(type="once", run_at=future_iso(hours=1), timezone="UTC"),
+            schedule=ScheduleSpec(
+                type="once", run_at=future_iso(hours=1), timezone="UTC"
+            ),
             execution=ExecutionSpec(
                 steps=[
                     {"tool": "HassTurnOn", "args": {"name": "fan"}},
-                    {"tool": "HassSetPosition", "args": {"name": "fan", "position": 50}},
+                    {
+                        "tool": "HassSetPosition",
+                        "args": {"name": "fan", "position": 50},
+                    },
                 ]
             ),
         )
@@ -79,7 +93,9 @@ def test_create_steps_plus_instruction(tmp_path):
     out = svc.create_task(
         TaskCreate(
             description="fetch weather then summarize",
-            schedule=ScheduleSpec(type="once", run_at=future_iso(hours=1), timezone="UTC"),
+            schedule=ScheduleSpec(
+                type="once", run_at=future_iso(hours=1), timezone="UTC"
+            ),
             execution=ExecutionSpec(
                 steps=[{"tool": "GetWeather", "args": {}}],
                 instruction="tell me tomorrow's weather in one sentence",
@@ -102,7 +118,9 @@ def test_reject_past_time(tmp_path):
         svc.create_task(
             TaskCreate(
                 description="past",
-                schedule=ScheduleSpec(type="once", run_at=future_iso(hours=-1), timezone="UTC"),
+                schedule=ScheduleSpec(
+                    type="once", run_at=future_iso(hours=-1), timezone="UTC"
+                ),
                 execution=ExecutionSpec(instruction="do it"),
             )
         )
@@ -114,7 +132,9 @@ def test_reject_bad_cron(tmp_path):
         svc.create_task(
             TaskCreate(
                 description="bad",
-                schedule=ScheduleSpec(type="recurring", cron="not a cron", timezone="UTC"),
+                schedule=ScheduleSpec(
+                    type="recurring", cron="not a cron", timezone="UTC"
+                ),
                 execution=ExecutionSpec(instruction="do it"),
             )
         )
@@ -127,7 +147,9 @@ async def test_recurring_task_next_run(tmp_path):
         out = svc.create_task(
             TaskCreate(
                 description="every morning",
-                schedule=ScheduleSpec(type="recurring", cron="0 8 * * *", timezone="UTC"),
+                schedule=ScheduleSpec(
+                    type="recurring", cron="0 8 * * *", timezone="UTC"
+                ),
                 execution=ExecutionSpec(instruction="good morning"),
             )
         )
@@ -142,7 +164,9 @@ def test_delete_task(tmp_path):
     out = svc.create_task(
         TaskCreate(
             description="x",
-            schedule=ScheduleSpec(type="once", run_at=future_iso(hours=1), timezone="UTC"),
+            schedule=ScheduleSpec(
+                type="once", run_at=future_iso(hours=1), timezone="UTC"
+            ),
             execution=ExecutionSpec(instruction="x"),
         )
     )
@@ -156,7 +180,9 @@ def test_update_reschedule(tmp_path):
     out = svc.create_task(
         TaskCreate(
             description="x",
-            schedule=ScheduleSpec(type="once", run_at=future_iso(hours=1), timezone="UTC"),
+            schedule=ScheduleSpec(
+                type="once", run_at=future_iso(hours=1), timezone="UTC"
+            ),
             execution=ExecutionSpec(instruction="x"),
         )
     )
@@ -172,30 +198,36 @@ async def test_fire_dispatches_and_records(tmp_path, monkeypatch):
     svc = make_service(tmp_path)
     calls = []
 
-    async def fake_dispatch(cfg, *, task_id, description, execution, run_id, room):
-        calls.append((task_id, run_id, execution))
+    async def fake_dispatch(
+        cfg, *, task_id, description, execution, run_id, room, user
+    ):
+        calls.append((task_id, run_id, execution, user))
 
     monkeypatch.setattr(service_module.dispatch, "dispatch_scheduled", fake_dispatch)
 
     out = svc.create_task(
         TaskCreate(
             description="fire me",
-            schedule=ScheduleSpec(type="once", run_at=future_iso(hours=1), timezone="UTC"),
+            schedule=ScheduleSpec(
+                type="once", run_at=future_iso(hours=1), timezone="UTC"
+            ),
             execution=ExecutionSpec(
                 steps=[{"tool": "HassTurnOff", "args": {"name": "AC"}}]
             ),
+            user="alice",
         )
     )
     await svc._fire(out.id)
 
     assert len(calls) == 1
-    task = svc.get_task(out.id)
+    assert calls[0][3] == "alice"
+    task = svc.get_task(out.id, owner="alice")
     assert task.status == "completed"  # one-shot is done after firing
     assert len(task.runs) == 1 and task.runs[0].status == "pending"
 
     run_id = calls[0][1]
     assert svc.record_run(run_id, "success", "done") is True
-    assert svc.get_task(out.id).runs[0].status == "success"
+    assert svc.get_task(out.id, owner="alice").runs[0].status == "success"
 
 
 def test_rehydrate_marks_missed(tmp_path):
@@ -219,3 +251,54 @@ def test_rehydrate_marks_missed(tmp_path):
         s.commit()
     svc._rehydrate()
     assert svc.get_task("deadbeef").status == "missed"
+
+
+def test_settings_users(tmp_path):
+    svc = make_service(tmp_path)
+    assert svc.get_settings().users == []
+    alice = UserSettings(name=" Alice ", notify_targets=["mobile_app_alice"])
+    out = svc.update_settings(SettingsUpdate(users=[alice]))
+    assert out.users[0].name == "Alice"
+    # updating one field keeps the other
+    out = svc.update_settings(SettingsUpdate(notify_targets=["mobile_app_x"]))
+    assert out.users[0].notify_targets == ["mobile_app_alice"]
+    with pytest.raises(ValueError):
+        SettingsUpdate(users=[alice, UserSettings(name="alice")])
+
+
+def test_adds_columns_to_an_old_database(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE settings (id INTEGER PRIMARY KEY, notify_targets JSON)")
+    con.execute("INSERT INTO settings VALUES (1, '[\"mobile_app_x\"]')")
+    con.commit()
+    con.close()
+    engine = make_engine(str(db))
+    svc = SchedulerService(make_service(tmp_path).cfg, make_session_factory(engine))
+    assert svc.get_settings().notify_targets == ["mobile_app_x"]
+    assert svc.get_settings().users == []
+
+
+def test_tasks_belong_to_their_owner(tmp_path):
+    svc = make_service(tmp_path)
+    svc.update_settings(
+        SettingsUpdate(users=[UserSettings(name="Alice", ha_user_id="ha1")])
+    )
+    req = TaskCreate(
+        description="mine",
+        schedule=ScheduleSpec(type="once", run_at=future_iso(hours=1), timezone="UTC"),
+        execution=ExecutionSpec(instruction="say hi"),
+    )
+    alice = svc.owner(None, "ha1")
+    assert alice == svc.owner(" ALICE ", None) == "alice"
+    out = svc.create_task(req, owner=alice)
+    assert out.user == "alice"
+    assert [t.id for t in svc.list_tasks(owner="alice")] == [out.id]
+    # no one else sees, edits or deletes it
+    assert svc.list_tasks(owner="bob") == [] and svc.list_tasks() == []
+    assert svc.get_task(out.id, owner="bob") is None
+    assert svc.update_task(out.id, TaskUpdate(enabled=False), owner="bob") is None
+    assert svc.delete_task(out.id) is None
+    assert svc.delete_task(out.id, owner="alice") is not None

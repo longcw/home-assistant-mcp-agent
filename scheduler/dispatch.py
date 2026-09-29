@@ -36,6 +36,7 @@ async def dispatch_scheduled(
     execution: dict,
     run_id: str,
     room: str,
+    user: str | None = None,
 ) -> None:
     metadata = json.dumps(
         {
@@ -44,6 +45,7 @@ async def dispatch_scheduled(
             "run_id": run_id,
             "description": description,
             "execution": execution,
+            "user": user,
         },
         ensure_ascii=False,
     )

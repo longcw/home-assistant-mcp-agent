@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from typing import Annotated
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -62,31 +63,39 @@ def healthz() -> dict:
     return {"ok": True}
 
 
+def owner(user: str | None = None, ha_user_id: str | None = None) -> str | None:
+    """The person a task request acts for; other people's tasks are not found."""
+    return service.owner(user, ha_user_id)
+
+
+Owner = Annotated[str | None, Depends(owner)]
+
+
 @app.post("/tasks", response_model=TaskOut, status_code=201, dependencies=guard)
-def create_task(req: TaskCreate) -> TaskOut:
+def create_task(req: TaskCreate, who: Owner) -> TaskOut:
     try:
-        return service.create_task(req)
+        return service.create_task(req, owner=who)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/tasks", response_model=list[TaskOut], dependencies=guard)
-def list_tasks(active_only: bool = True) -> list[TaskOut]:
-    return service.list_tasks(active_only=active_only)
+def list_tasks(who: Owner, active_only: bool = True) -> list[TaskOut]:
+    return service.list_tasks(active_only=active_only, owner=who)
 
 
 @app.get("/tasks/{task_id}", response_model=TaskOut, dependencies=guard)
-def get_task(task_id: str) -> TaskOut:
-    out = service.get_task(task_id)
+def get_task(task_id: str, who: Owner) -> TaskOut:
+    out = service.get_task(task_id, owner=who)
     if out is None:
         raise HTTPException(status_code=404, detail="task not found")
     return out
 
 
 @app.patch("/tasks/{task_id}", response_model=TaskOut, dependencies=guard)
-def update_task(task_id: str, req: TaskUpdate) -> TaskOut:
+def update_task(task_id: str, req: TaskUpdate, who: Owner) -> TaskOut:
     try:
-        out = service.update_task(task_id, req)
+        out = service.update_task(task_id, req, owner=who)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if out is None:
@@ -95,8 +104,8 @@ def update_task(task_id: str, req: TaskUpdate) -> TaskOut:
 
 
 @app.delete("/tasks/{task_id}", response_model=TaskOut, dependencies=guard)
-def delete_task(task_id: str) -> TaskOut:
-    out = service.delete_task(task_id)
+def delete_task(task_id: str, who: Owner) -> TaskOut:
+    out = service.delete_task(task_id, owner=who)
     if out is None:
         raise HTTPException(status_code=404, detail="task not found")
     return out
