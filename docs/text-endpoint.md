@@ -24,9 +24,11 @@ curl -X POST http://<agent-host>:8952/chat \
 
 ### History, and the card's Text tab
 
-`GET /chat/history?limit=200` (same bearer token) returns `{"conversation_id", "busy", "items"}`: the current conversation's messages and tool calls, shaped like the card's conversation items (`{"kind": "message", "role": "user"|"agent", "text"}` and `{"kind": "action", "name", "args", "status"}`). It reads the loaded session while the conversation is live, and the store otherwise; `busy` is true while a turn runs.
+`GET /chat/history?limit=200` (same bearer token) returns `{"conversation_id", "busy", "items"}`: the current conversation's messages and tool calls, shaped like the card's conversation items (`{"kind": "message", "role": "user"|"agent", "text"}` and `{"kind": "action", "name", "args", "status"}`). It reads the loaded session while the conversation is live, and the store otherwise; `busy` is true while a turn runs. `?conversation_id=` reads one of the person's past conversations instead, with `current: false` and never `busy`.
 
-The HA integration (`ha-livekit-agent-frontend`) proxies it and `POST /chat` as `/api/livekit_voice/chat[/history]`, configured with `chat_url` (here `http://127.0.0.1:8952`, since HA runs on the host network) and `chat_token` (`TEXT_API_TOKEN`). The card's **Text** tab renders that conversation, polls it every second while a turn runs, and sends into it; `?lk_tab=text` on a dashboard URL opens the tab, which is what `TEXT_LIVE_URL` points the phone progress at.
+`GET /chat/conversations` lists the person's conversations, latest first, as `{"current", "conversations": [{"id", "title", "created", "updated"}]}`; the title is the first message. `POST /chat/switch` `{"conversation_id"}` makes a past one current, so the next turn, from the card or the phone, continues it; it is refused while a turn runs. `POST /chat/delete` `{"conversation_id"}` removes a past conversation's SQLite files; the current one, and one still loaded, are never deleted. Who owns which conversation, and its title and last turn, are kept in `agent-data/conversations.json`; a conversation missing from it belongs to no one and is not listed.
+
+The HA integration (`ha-livekit-agent-frontend`) proxies these and `POST /chat` as `/api/livekit_voice/chat[/history|/conversations|/switch|/delete|/cancel]`, configured with `chat_url` (here `http://127.0.0.1:8952`, since HA runs on the host network) and `chat_token` (`TEXT_API_TOKEN`). The card's **Text** tab renders that conversation (its history button lists the others, to read, continue or delete), polls it every second while a turn runs, and sends into it; `?lk_tab=text` on a dashboard URL opens the tab, which is what `TEXT_LIVE_URL` points the phone progress at.
 
 The chat routes are registered before `@server.a2a_session`: the A2A binding mounts a catch-all that shadows GET routes added after it.
 
@@ -87,7 +89,7 @@ A crash loses the turns since the last save. The next request after a drop or a 
 | `livekit-agents` and `livekit-protocol` pinned to commits (`[tool.uv.sources]`) | `agent/pyproject.toml`, `agent/uv.lock` |
 | `git` in the image, for those pins | `agent/Dockerfile` |
 | `AgentServer(store=...)` | `agent/src/main.py`, one line |
-| `livekit.agents.store.LocalStore`, `create_database()`, `session(...).load()`/`.release()` and `SessionRecord.history` (the history view of an unloaded conversation), `StoreError` | `agent/src/text_chat.py` |
+| `livekit.agents.store.LocalStore`, `create_database()`, `session(...).load()`/`.release()` and `SessionRecord.history` (the history view of an unloaded conversation), `StoreError`, the private `SessionStore._databases` and the `<id>.sqlite` file naming (deleting a conversation) | `agent/src/text_chat.py` |
 | `@server.a2a_session(endpoint=, description=, idle_timeout=)`, `A2ASessionContext.persisted`, `ctx.attach()` | `agent/src/text_chat.py` |
 | `AgentSession.start(persist=)` | `agent/src/text_chat.py` |
 | `livekit.agents.a2a.A2AClient(url, context_id=, headers=)`, `.send()`, `.aclose()`, `TaskInput(text=, conversation_id=)`, `TaskUpdate.state`/`.text`/`.item` (a `FunctionCall` with `update_of` for a progress report) | `agent/src/text_chat.py` |

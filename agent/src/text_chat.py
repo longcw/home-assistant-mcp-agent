@@ -43,6 +43,44 @@ _live: dict[str, AgentSession] = {}
 _suggested: dict[str, list[str]] = {}
 # the person each conversation belongs to, for the A2A endpoint's agent
 _owners: dict[str, str | None] = {}
+# each conversation's owner, title and last turn, so a person can list and reopen theirs
+_index_file = _data_dir / "conversations.json"
+
+
+def _index() -> dict[str, dict[str, object]]:
+    try:
+        return json.loads(_index_file.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _record(conversation_id: str, user: str | None, title: str = "") -> None:
+    """Note a turn in a person's conversation; the first message becomes its title."""
+    index = _index()
+    entry = index.setdefault(conversation_id, {"created": time.time()})
+    entry["user"] = user
+    entry["updated"] = time.time()
+    if title and not entry.get("title"):
+        entry["title"] = title[:80]
+    _index_file.write_text(json.dumps(index, ensure_ascii=False, indent=1))
+
+
+async def _items(conversation_id: str) -> list:
+    """A conversation's chat items, from its loaded session or else the store."""
+    if (session := _live.get(conversation_id)) is not None:
+        return list(session.history.items)
+    # not loaded, so read what the last close saved; this stamps the row closed
+    # again, and leaves a new conversation an empty row that loads as new
+    stored = store.session(conversation_id, conversation_id, endpoint=A2A_ENDPOINT)
+    try:
+        record = await stored.load()
+        return list(record.history) if record else []
+    except StoreError:
+        logger.warning("could not read conversation %s", conversation_id)
+        return []
+    finally:
+        with contextlib.suppress(StoreError):
+            await stored.release()
 
 
 class _Conversation:
@@ -86,6 +124,7 @@ class _Conversation:
         if started:
             self._conversation_id = await store.create_database()
             self._current_file.write_text(self._conversation_id)
+            _record(self._conversation_id, self._user)
             logger.info("started text conversation %s", self._conversation_id)
         assert self._conversation_id is not None
         _owners[self._conversation_id] = self._user
@@ -109,6 +148,7 @@ class _Conversation:
             client, conversation_id, started = await self._open(renew)
             if not text:
                 return conversation_id, "Started a new conversation."
+            _record(conversation_id, self._user, text)
             suggested = _suggested.setdefault(conversation_id, [])
             suggested.clear()
             self._progress.target = await scheduler.phone(self._user)
@@ -216,29 +256,96 @@ class _Conversation:
                 self._tapped.add(task)
                 task.add_done_callback(self._tapped.discard)
 
-    async def history(self, limit: int) -> dict[str, object]:
-        """The current conversation's latest ``limit`` messages and tool calls, shaped
-        like the card's conversation items."""
-        conversation_id = self._conversation_id
-        if conversation_id is None and self._current_file.exists():
-            conversation_id = self._current_file.read_text().strip() or None
-        items = []
-        if conversation_id and (session := _live.get(conversation_id)) is not None:
-            items = list(session.history.items)
-        elif conversation_id:
-            # not loaded, so read what the last close saved; this stamps the row closed
-            # again, and leaves a new conversation an empty row that loads as new
-            stored = store.session(
-                conversation_id, conversation_id, endpoint=A2A_ENDPOINT
+    def _current(self) -> str | None:
+        if self._conversation_id is None and self._current_file.exists():
+            return self._current_file.read_text().strip() or None
+        return self._conversation_id
+
+    def _owns(self, conversation_id: str) -> bool:
+        entry = _index().get(conversation_id)
+        return entry is not None and entry.get("user") == self._user
+
+    async def conversations(self) -> dict[str, object]:
+        """This person's conversations, latest first, titled by their first message."""
+        index = _index()
+        mine = {k: v for k, v in index.items() if v.get("user") == self._user}
+        for conversation_id, entry in mine.items():
+            if "title" in entry:
+                continue
+            # recorded before titles were, or never spoken in: read the first message
+            first = next(
+                (
+                    i.text_content
+                    for i in await _items(conversation_id)
+                    if i.type == "message" and i.role == "user" and i.text_content
+                ),
+                None,
             )
-            try:
-                record = await stored.load()
-                items = list(record.history) if record else []
-            except StoreError:
-                logger.warning("could not read conversation %s", conversation_id)
-            finally:
-                with contextlib.suppress(StoreError):
-                    await stored.release()
+            # an empty title marks one never spoken in, so it is read only once
+            entry["title"] = (first or "")[:80]
+            index[conversation_id] = entry
+            _index_file.write_text(json.dumps(index, ensure_ascii=False, indent=1))
+        rows = [
+            {
+                "id": k,
+                "title": v.get("title") or "",
+                "created": int(float(v.get("created") or 0) * 1000),
+                "updated": int(float(v.get("updated") or 0) * 1000),
+            }
+            for k, v in mine.items()
+        ]
+        rows.sort(key=lambda r: r["updated"], reverse=True)
+        return {"current": self._current(), "conversations": rows}
+
+    async def switch(self, conversation_id: str) -> bool:
+        """Make one of this person's conversations the current one."""
+        if not self._owns(conversation_id) or self._lock.locked():
+            return False
+        async with self._lock:
+            if conversation_id == self._current():
+                return True
+            if self._client is not None:
+                # the goodbye closes the old context on the server, which saves it
+                await self._client.aclose()
+                self._client = None
+            self._conversation_id = conversation_id
+            self._current_file.write_text(conversation_id)
+            _record(conversation_id, self._user)
+            logger.info("switched to text conversation %s", conversation_id)
+            return True
+
+    async def delete(self, conversation_id: str) -> bool:
+        """Delete one of this person's past conversations that is not live."""
+        if not self._owns(conversation_id) or conversation_id == self._current():
+            return False
+        if conversation_id in _live:
+            return False
+        # the store keeps a connection per database it has read
+        if (database := store._databases.pop(conversation_id, None)) is not None:
+            await database.aclose()
+        for path in (_data_dir / "sessions").glob(f"{conversation_id}.sqlite*"):
+            path.unlink(missing_ok=True)
+        index = _index()
+        index.pop(conversation_id, None)
+        _index_file.write_text(json.dumps(index, ensure_ascii=False, indent=1))
+        _suggested.pop(conversation_id, None)
+        _owners.pop(conversation_id, None)
+        logger.info("deleted text conversation %s", conversation_id)
+        return True
+
+    async def history(
+        self, limit: int, conversation_id: str | None = None
+    ) -> dict[str, object] | None:
+        """A conversation's latest ``limit`` messages and tool calls, shaped like the
+        card's conversation items: the current one, or another of this person's."""
+        current = self._current()
+        if conversation_id and conversation_id != current:
+            if not self._owns(conversation_id):
+                return None
+        else:
+            conversation_id = current
+        items = await _items(conversation_id) if conversation_id else []
+        live = conversation_id == current
 
         outputs = {i.call_id: i for i in items if i.type == "function_call_output"}
         shown: list[dict[str, object]] = []
@@ -283,9 +390,10 @@ class _Conversation:
                     suggestions = [str(r) for r in args.get("replies") or []]
         return {
             "conversation_id": conversation_id,
-            "busy": self._lock.locked(),
+            "current": live,
+            "busy": live and self._lock.locked(),
             # the running turn's task, which POST /chat/cancel takes
-            "task_id": self._stream.task_id or None if self._stream else None,
+            "task_id": self._stream.task_id or None if live and self._stream else None,
             "items": shown[-limit:],
             "suggestions": suggestions,
         }
@@ -491,11 +599,42 @@ def mount(server: AgentServer) -> None:
 
     @server.http.get(f"{CHAT_PATH}/history")
     async def chat_history(
-        limit: int = 200, user: str = "", ha_user_id: str = ""
+        limit: int = 200,
+        user: str = "",
+        ha_user_id: str = "",
+        conversation_id: str = "",
     ) -> JSONResponse:
-        """A person's current conversation for a UI; `busy` while a turn runs."""
+        """A person's current conversation, or one they name, for a UI; `busy` while
+        a turn runs."""
         conversation = await conversation_for(user, ha_user_id)
-        return JSONResponse(await conversation.history(limit))
+        history = await conversation.history(limit, conversation_id or None)
+        if history is None:
+            return JSONResponse({"detail": "no such conversation"}, status_code=404)
+        return JSONResponse(history)
+
+    @server.http.get(f"{CHAT_PATH}/conversations")
+    async def chat_conversations(user: str = "", ha_user_id: str = "") -> JSONResponse:
+        """A person's conversations, latest first, and which one is current."""
+        conversation = await conversation_for(user, ha_user_id)
+        return JSONResponse(await conversation.conversations())
+
+    @server.http.post(f"{CHAT_PATH}/switch")
+    async def chat_switch(request: Request) -> JSONResponse:
+        """Make `{"conversation_id", "user"}` the person's current conversation."""
+        body = (await request.body()).decode().strip()
+        data = json.loads(body or "{}")
+        conversation = await conversation_for(data.get("user"), data.get("ha_user_id"))
+        target = str(data.get("conversation_id") or "")
+        return JSONResponse({"switched": await conversation.switch(target)})
+
+    @server.http.post(f"{CHAT_PATH}/delete")
+    async def chat_delete(request: Request) -> JSONResponse:
+        """Delete `{"conversation_id", "user"}`, a person's past conversation."""
+        body = (await request.body()).decode().strip()
+        data = json.loads(body or "{}")
+        conversation = await conversation_for(data.get("user"), data.get("ha_user_id"))
+        target = str(data.get("conversation_id") or "")
+        return JSONResponse({"deleted": await conversation.delete(target)})
 
     @server.http.post(f"{CHAT_PATH}/cancel")
     async def chat_cancel(request: Request) -> JSONResponse:

@@ -1,3 +1,6 @@
+custom_components/livekit_voice/scheduler/data
+.claude/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
