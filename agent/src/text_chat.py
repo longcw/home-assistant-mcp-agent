@@ -15,7 +15,6 @@ import logging
 import time
 import uuid
 from pathlib import Path
-from typing import Any
 from urllib.parse import quote
 
 from fastapi import Request
@@ -94,6 +93,10 @@ class _Turn:
         self.sent_at = time.time()
         # a newer message or a stop took over: nothing it does reaches the phone
         self.quiet = False
+        # its reply was stopped, while the tools it started may run on
+        self.interrupted = False
+        # a tool result arrived after that, so the answer it brings is worth a push
+        self.late = False
         self.reader: asyncio.Task[None] | None = None
         # its step lines and its answer, for a sender that waits for them
         self.reply: asyncio.Future[tuple[list[str], str]] = (
@@ -186,9 +189,11 @@ class _Conversation:
             # an update never cuts the person off: it waits for their turn to end
             await asyncio.wait([self._turn.reader])
         async with self._lock:
+            superseding = False
             if (previous := self._turn) is not None:
-                if interrupt:
-                    self._stop(previous, "superseded by a new message")
+                if interrupt and previous.running and not previous.quiet:
+                    # the new turn interrupts it on the server before it runs
+                    previous.interrupted = superseding = True
                 # a context's messages are ordered only once the previous one has a task
                 await previous.acked()
             client, conversation_id, started = await self._open(renew)
@@ -201,7 +206,11 @@ class _Conversation:
                 self._progress.begin(text)
                 if self._listener is None or self._listener.done():
                     self._listener = asyncio.create_task(self._listen())
-            task_input = TaskInput(text=text, conversation_id=conversation_id)
+            task_input = TaskInput(
+                text=text,
+                conversation_id=conversation_id,
+                interrupting=[] if superseding else None,
+            )
             turn = self._turn = _Turn(client.send(task_input), text)
             turn.reader = asyncio.create_task(self._read(turn, conversation_id))
         if not wait:
@@ -220,15 +229,22 @@ class _Conversation:
 
     async def _read(self, turn: _Turn, conversation_id: str) -> None:
         """Read a turn's updates to its end: its steps, then its answer."""
-        live = self._progress if self._progress.target else None
+        phone = self._progress if self._progress.target else None
         lines: list[str] = []
         said: list[str] = []
         answer, ok = "", True
         try:
             async with turn.stream as stream:
                 async for update in stream:
-                    live = None if turn.quiet else live
                     item = update.item
+                    if (
+                        turn.interrupted
+                        and item
+                        and item.type == "function_call_output"
+                    ):
+                        turn.late = True
+                    silent = turn.quiet or (turn.interrupted and not turn.late)
+                    live = None if silent else phone
                     if item is None or item.type != "function_call":
                         if update.text:
                             said.append(update.text)
@@ -263,7 +279,8 @@ class _Conversation:
         finally:
             if not turn.reply.done():
                 turn.reply.set_result((lines, answer))
-        if turn.quiet or self._progress.target == "":
+        silent = turn.quiet or (turn.interrupted and not turn.late)
+        if silent or self._progress.target == "":
             return
         # the suggested replies become buttons, and Reply takes free text
         nonce = uuid.uuid4().hex[:8]
@@ -286,61 +303,70 @@ class _Conversation:
         )
         self._progress.finish(answer, ok=ok, actions=actions)
 
-    def _stop(self, turn: _Turn | None, reason: str) -> bool:
-        """Silence a running turn now and cancel its task in the background."""
+    def _stop(self, turn: _Turn | None, reason: str, *, force: bool) -> bool:
+        """Stop a running turn's reply in the background; with ``force``, the tools it
+        started as well."""
         if turn is None or not turn.running or turn.quiet:
             return False
-        # before its session has started a turn has done nothing to stop, and a cancel
-        # then would stop the start itself, and every later turn with it
-        if self._conversation_id not in _live:
+        if force:
+            turn.quiet = True
+        elif turn.interrupted:
             return False
-        turn.quiet = True
-        chore = asyncio.create_task(self._cancel(turn, reason))
+        else:
+            turn.interrupted = True
+        chore = asyncio.create_task(self._halt(turn, reason, force=force))
         self._chores.add(chore)
         chore.add_done_callback(self._chores.discard)
         return True
 
-    async def _cancel(self, turn: _Turn, reason: str) -> None:
-        # the task has no id to cancel by until its first event arrives
+    async def _halt(self, turn: _Turn, reason: str, *, force: bool) -> None:
+        # the task has no id to stop it by until its first event arrives
         await turn.acked()
         if turn.running and turn.stream.task_id:
             with contextlib.suppress(Exception):
-                await turn.stream.cancel(reason)
+                if force:
+                    await turn.stream.cancel(reason)
+                else:
+                    await turn.stream.interrupt()
 
-    def warm(self, executor: Any) -> bool:
-        """Load the current conversation's session in the background, with no turn, so
-        the next message does not wait for it; False when there is nothing to load."""
+    def warm(self) -> bool:
+        """Start the current conversation's session in the background, with no turn, so
+        the next message does not wait for it; False when there is nothing to start."""
         conversation_id = self._current()
-        if conversation_id is None or conversation_id in _live or self._lock.locked():
+        if conversation_id is None or conversation_id in _live:
             return False
         if settings.text_renew_after > 0 and self._current_file.exists():
             idle = time.time() - self._current_file.stat().st_mtime
             if idle > settings.text_renew_after:
                 return False  # the next message starts a new conversation instead
         _owners[conversation_id] = self._user
-        # the endpoint's own start of a context, as its first request would make it
-        task_input = TaskInput(text="", conversation_id=conversation_id)
-        held = executor._context(conversation_id, task_input)
-        chore = asyncio.create_task(self._warm(held, conversation_id))
+        chore = asyncio.create_task(self._warm(conversation_id))
         self._chores.add(chore)
         chore.add_done_callback(self._chores.discard)
         return True
 
-    async def _warm(self, held: Any, conversation_id: str) -> None:
+    async def _warm(self, conversation_id: str) -> None:
         logger.info("warming text conversation %s", conversation_id)
+        async with self._lock:
+            if self._client is None and self._current() == conversation_id:
+                self._client = A2AClient(
+                    self._url, context_id=conversation_id, headers=self._headers
+                )
+            client = self._client
+        if client is None:
+            return
         try:
-            # shielded, as a cancelled warm-up must not cancel the start a turn shares
-            await asyncio.shield(held.runner())
+            await client.prewarm(conversation_id=conversation_id)
         except Exception:
             logger.exception("could not warm text conversation %s", conversation_id)
 
-    def cancel(self, task_id: str | None) -> bool:
-        """Stop the running turn in the background; naming a task never stops a newer
-        one."""
+    def cancel(self, task_id: str | None, *, force: bool = False) -> bool:
+        """Stop the running turn's reply, and with ``force`` the tools it started too;
+        naming a task never stops a newer one."""
         turn = self._turn
         if turn is None or (task_id and task_id != turn.stream.task_id):
             return False
-        return self._stop(turn, "stopped by the user")
+        return self._stop(turn, "stopped by the user", force=force)
 
     async def _listen(self) -> None:
         """Send a tap on the latest answer's buttons into the conversation."""
@@ -455,8 +481,20 @@ class _Conversation:
         suggestions: list[str] = []
         for item in items:
             ts = int(item.created_at * 1000)
+            text = item.text_content if item.type == "message" else None
+            if text and item.role == "user" and text.startswith(UPDATE_PREFIX):
+                # an update is not the person: shown as a closed row, like a tool's
+                source, _, body = (
+                    text.removeprefix(UPDATE_PREFIX).strip().partition(": ")
+                )
+                shown.append(
+                    {"kind": "action", "id": item.id, "call_id": item.id, "ts": ts}
+                    | {"name": "update_from", "args": {"name": source}}
+                    | {"status": "done", "output": body[:1000]}
+                )
+                continue
             if item.type == "message" and item.role in ("user", "assistant"):
-                if text := item.text_content:
+                if text:
                     role = "user" if item.role == "user" else "agent"
                     shown.append(
                         {"kind": "message", "id": item.id, "role": role, "text": text}
@@ -493,6 +531,8 @@ class _Conversation:
         if (
             live
             and turn is not None
+            # an update turn's message is not the person's, and becomes a row
+            and not turn.text.startswith(UPDATE_PREFIX)
             and not any(
                 i["kind"] == "message"
                 and i["role"] == "user"
@@ -673,8 +713,6 @@ def mount(server: AgentServer) -> None:
         return await call_next(request)
 
     conversations: dict[str | None, _Conversation] = {}
-    # this endpoint's A2A executor, found once the binding below is mounted
-    executor: Any = None
 
     async def conversation_for(name: object, ha_user_id: object) -> _Conversation:
         """The conversation of the person a request names, or its HA login's."""
@@ -766,17 +804,16 @@ def mount(server: AgentServer) -> None:
 
     @server.http.post(f"{CHAT_PATH}/cancel")
     async def chat_cancel(request: Request) -> JSONResponse:
-        """Stop a person's running turn, answering at once: `{"task_id", "user"}`, the
-        task from history, or none for whichever runs."""
+        """Stop a person's running turn's reply, answering at once: `{"task_id",
+        "user"}`, the task from history or none for whichever runs; `"force": true`
+        stops the tools it started as well."""
         body = (await request.body()).decode().strip()
         data = json.loads(body or "{}")
         conversation = await conversation_for(data.get("user"), data.get("ha_user_id"))
         task_id = str(data.get("task_id") or "") or None
-        cancelled = conversation.cancel(task_id)
+        cancelled = conversation.cancel(task_id, force=bool(data.get("force")))
         # a client cancels as the person starts to speak, so their message is coming
-        return JSONResponse(
-            {"cancelled": cancelled, "warming": conversation.warm(executor)}
-        )
+        return JSONResponse({"cancelled": cancelled, "warming": conversation.warm()})
 
     @server.http.post(f"{CHAT_PATH}/warm")
     async def chat_warm(request: Request) -> JSONResponse:
@@ -784,7 +821,7 @@ def mount(server: AgentServer) -> None:
         body = (await request.body()).decode().strip()
         data = json.loads(body or "{}")
         conversation = await conversation_for(data.get("user"), data.get("ha_user_id"))
-        return JSONResponse({"warming": conversation.warm(executor)})
+        return JSONResponse({"warming": conversation.warm()})
 
     updates: set[asyncio.Task[object]] = set()
 
@@ -827,10 +864,5 @@ def mount(server: AgentServer) -> None:
             agent.chat_ctx.copy().truncate(max_items=settings.text_max_items)
         )
         ctx.attach(session)
-        # last, with nothing awaited after it: until then a cancel is a no-op, since
-        # cancelling while this handler runs would stop it
         _live[ctx.context_id] = session
         session.on("close", lambda _: _live.pop(ctx.context_id, None))
-
-    # a2a_session returns the handler, not its executor, so that is found by name
-    executor = next(e for e in server._a2a_sessions if e._endpoint == A2A_ENDPOINT)
