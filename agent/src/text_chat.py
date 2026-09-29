@@ -273,9 +273,11 @@ class _Conversation:
                     "args": args,
                     "status": status,
                 }
-                # short outputs only (a scheduled task, say), not a home's device list
-                if out is not None and len(out.output) <= 1000:
-                    action["output"] = out.output
+                # clipped, so a home's device list does not ride on every poll
+                if out is not None:
+                    action["output"] = out.output[:1000]
+                    if len(out.output) > 1000:
+                        action["output_chars"] = len(out.output)
                 shown.append(action)
                 if item.name == "suggest_replies" and isinstance(args, dict):
                     suggestions = [str(r) for r in args.get("replies") or []]
