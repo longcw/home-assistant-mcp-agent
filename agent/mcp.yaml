@@ -1,0 +1,53 @@
+# MCP servers the agent uses besides Home Assistant's own, which it always connects.
+#
+# Read per session, and bind-mounted like prompt.yaml, so an edit applies to the next
+# conversation. Point MCP_CONFIG (or AGENT_MCP_CONFIG in docker-compose) at a copy to use
+# your own list; without a file the agent has only Home Assistant's tools.
+#
+# Values take ${VAR} or ${VAR:-default} from the environment, so keys stay in .env. Per
+# entry:
+#   id               the toolset's name, and what a person's Settings entry lists for a
+#                    restricted server
+#   url              Streamable HTTP endpoint; an entry whose url comes out empty is skipped
+#   headers          sent on every request; a header whose variable is unset is left out
+#   requires         variables that must be set, or the entry is skipped
+#   timeout          seconds for any one request to the server (default 5)
+#   allowed_tools    only these of the server's tools reach the LLM
+#   report_progress  tools that answer at once and report their result as a later update
+#   per_person       an adapter scoping the server to the person speaking (mem0)
+#   restricted       offered only to people whose Settings entry lists this id
+#   callback         sends this agent's webhook as X-Callback-Url / X-Callback-Token, for
+#                    results that outlive a tool call (needs CALLBACK_BASE_URL and
+#                    TEXT_API_TOKEN)
+
+servers:
+  # Parallel Search: web_search and web_fetch. The anonymous free tier needs no key.
+  - id: web-search
+    url: ${WEB_SEARCH_URL:-https://search.parallel.ai/mcp}
+    headers:
+      Authorization: Bearer ${PARALLEL_API_KEY}
+
+  # Mem0: preferences remembered across conversations, each person's in their own scope.
+  - id: memory
+    url: https://mcp.mem0.ai/mcp
+    headers:
+      Authorization: Bearer ${MEM0_API_KEY}
+    requires: [MEM0_API_KEY]
+    # Mem0 routinely takes 3-4 s to list its tools, and a failed setup loses memory
+    timeout: 20
+    # bulk deletes and event bookkeeping stay out of the LLM's reach
+    allowed_tools: [add_memory, search_memories, get_memories, update_memory, delete_memory]
+    per_person: mem0
+
+  # herdr-mcp-server: start, check and prompt coding agents (Claude Code) on a computer
+  # running herdr (https://github.com/longcw/herdr-mcp-server). They can run code there,
+  # so only people whose Settings entry lists "herdr" get it.
+  - id: herdr
+    url: ${HERDR_MCP_URL}
+    requires: [HERDR_MCP_URL]
+    # a tool that sends work waits up to the server's 60 s watch window
+    timeout: 90
+    report_progress:
+      [start_herdr_agent, watch_herdr_agent, prompt_herdr_agent, answer_herdr_permission]
+    restricted: true
+    callback: true

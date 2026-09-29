@@ -106,6 +106,12 @@ async def notify_targets(user: str | None = None) -> list[str] | None:
     return list(person.get("notify_targets") or []) if person else None
 
 
+async def allows_server(user: str | None, server_id: str) -> bool:
+    """Whether the Settings tab lists a restricted MCP server for this person."""
+    person = _person(await _settings() or {}, user)
+    return bool(person and server_id in (person.get("servers") or []))
+
+
 async def phone(user: str | None) -> str:
     """The notify service showing a person's text-turn progress; "" for none.
 

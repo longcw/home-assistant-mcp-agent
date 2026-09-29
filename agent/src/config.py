@@ -13,10 +13,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# prompt.yaml lives at the agent root, one level up from src/.
-_DEFAULT_PROMPT_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)), "prompt.yaml"
-)
+# prompt.yaml and mcp.yaml live at the agent root, one level up from src/.
+_AGENT_ROOT = os.path.dirname(os.path.dirname(__file__))
 
 
 @dataclass(frozen=True)
@@ -44,12 +42,10 @@ class Settings:
     # Home Assistant base URL and long-lived token.
     ha_url: str
     ha_token: str
-    # Parallel Search MCP endpoint (web_search / web_fetch); empty turns web search off.
-    web_search_url: str
-    # Parallel API key for higher limits; empty uses the anonymous free tier.
-    parallel_api_key: str
-    # Mem0 API key for long-term memory across conversations; empty turns memory off.
-    mem0_api_key: str
+    # MCP servers beyond Home Assistant's (YAML `servers:`); a missing file adds none.
+    mcp_config: str
+    # this agent's HTTP app as MCP servers reach it, for their callbacks; empty = none.
+    callback_base_url: str
     # Port of the agent server's HTTP app, which serves the text chat endpoints.
     http_port: int
     # Bearer token for the text chat endpoints; empty leaves them unmounted.
@@ -83,7 +79,7 @@ def load_settings() -> Settings:
         tts_voice=os.getenv("TTS_VOICE", "5c353fdb312f4888836a9a5680099ef0"),
         tts_language=os.getenv("TTS_LANGUAGE", ""),
         agent_name=os.getenv("AGENT_NAME", "ha-agent"),
-        prompt_file=os.getenv("PROMPT_FILE", _DEFAULT_PROMPT_FILE),
+        prompt_file=os.getenv("PROMPT_FILE", os.path.join(_AGENT_ROOT, "prompt.yaml")),
         stt_idle_timeout=float(os.getenv("STT_IDLE_TIMEOUT", "120")),
         scheduled_run_timeout=float(os.getenv("SCHEDULED_RUN_TIMEOUT", "120")),
         scheduler_url=os.getenv("SCHEDULER_URL", "http://scheduler:8080"),
@@ -91,9 +87,8 @@ def load_settings() -> Settings:
         agent_tz=os.getenv("AGENT_TZ") or os.getenv("TZ") or "UTC",
         ha_url=os.getenv("HA_URL", ""),
         ha_token=os.getenv("HA_TOKEN", ""),
-        web_search_url=os.getenv("WEB_SEARCH_URL", "https://search.parallel.ai/mcp"),
-        parallel_api_key=os.getenv("PARALLEL_API_KEY", ""),
-        mem0_api_key=os.getenv("MEM0_API_KEY", ""),
+        mcp_config=os.getenv("MCP_CONFIG", os.path.join(_AGENT_ROOT, "mcp.yaml")),
+        callback_base_url=os.getenv("CALLBACK_BASE_URL", ""),
         http_port=int(os.getenv("HTTP_PORT", "8081")),
         text_api_token=os.getenv("TEXT_API_TOKEN", ""),
         text_data_dir=os.getenv("TEXT_DATA_DIR", "/data"),
@@ -114,8 +109,8 @@ settings = load_settings()
 # --- Fixed protocol constants (not env-configurable) ---
 # HA's MCP Server integration exposes Streamable HTTP at /api/mcp.
 MCP_PATH = "/api/mcp"
-# Mem0's hosted MCP server; each person's memories are their own user scope there.
-MEM0_MCP_URL = "https://mcp.mem0.ai/mcp"
+# How a webhook's update opens the user message that carries it into a conversation.
+UPDATE_PREFIX = "[update]"
 # HA tool returning the live state of all exposed entities.
 LIVE_CONTEXT_TOOL = "GetLiveContext"
 # Data-channel topic carrying the tool-execution lifecycle: powers the frontend's tool

@@ -11,10 +11,12 @@ services:
       # scheduling tools call it, and the headless fire-time branch reports runs to it.
       SCHEDULER_URL: http://scheduler:8080
     volumes:
-      # System prompt is mounted (not baked in) so edits apply on the next conversation
-      # with no image rebuild — edit agent/prompt.yaml, then `docker compose restart agent`
-      # (or just start a new conversation, since it's re-read per session).
-      - ./agent/prompt.yaml:/app/prompt.yaml:ro
+      # System prompt and MCP server list are mounted (not baked in) so edits apply on the
+      # next conversation with no image rebuild, since both are re-read per session. Set
+      # AGENT_PROMPT / AGENT_MCP_CONFIG in .env to use your own untracked copies, e.g.
+      # agent/prompt.local.yaml with rules for your home.
+      - ${AGENT_PROMPT:-./agent/prompt.yaml}:/app/prompt.yaml:ro
+      - ${AGENT_MCP_CONFIG:-./agent/mcp.yaml}:/app/mcp.yaml:ro
       # Persisted text conversations (one SQLite file each) and the current one's id.
       - ./agent-data:/data
     ports:

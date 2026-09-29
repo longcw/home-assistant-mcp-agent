@@ -26,7 +26,7 @@ from livekit.agents.store import LocalStore, StoreError
 import ha
 import scheduler_client as scheduler
 from agent import HomeAssistantAgent
-from config import settings
+from config import UPDATE_PREFIX, settings
 
 logger = logging.getLogger("ha-mcp-agent.text")
 
@@ -505,6 +505,29 @@ def mount(server: AgentServer) -> None:
         conversation = await conversation_for(data.get("user"), data.get("ha_user_id"))
         task_id = str(data.get("task_id") or "") or None
         return JSONResponse({"cancelled": await conversation.cancel(task_id)})
+
+    updates: set[asyncio.Task[object]] = set()
+
+    @server.http.post(f"{CHAT_PATH}/events")
+    async def chat_event(request: Request) -> Response:
+        """Take a webhook's `{"source", "text"}` into a person's conversation as a turn
+        the agent answers with no tools, e.g. a Claude Code task that finished."""
+        data = json.loads((await request.body()).decode() or "{}")
+        text = str(data.get("text") or "").strip()
+        if not text:
+            return PlainTextResponse("no text given", status_code=400)
+        query = request.query_params
+        user, ha_user_id = query.get("user"), query.get("ha_user_id")
+        conversation = await conversation_for(user, ha_user_id)
+        source = str(data.get("source") or "a webhook")
+        logger.info("update from %s: %s", source, text[:120])
+        # answered in the background, so the sender is not held for a whole turn
+        turn = asyncio.create_task(
+            conversation.send(f"{UPDATE_PREFIX} {source}: {text}", steps=False)
+        )
+        updates.add(turn)
+        turn.add_done_callback(updates.discard)
+        return JSONResponse({"accepted": True}, status_code=202)
 
     # after the routes above: the A2A binding mounts a catch-all that shadows later ones
     @server.a2a_session(

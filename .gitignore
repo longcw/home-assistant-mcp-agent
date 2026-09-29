@@ -180,3 +180,6 @@ scheduler/data/
 
 # persisted text conversations
 agent-data/
+
+# per-deployment overrides of agent/prompt.yaml and agent/mcp.yaml
+agent/*.local.yaml

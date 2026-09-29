@@ -16,11 +16,11 @@ def to_aware_iso(run_at: str, tz: str) -> str:
     return dt.isoformat()
 
 
-def current_time_text(tz: str) -> str:
-    """The 'current local time' line injected fresh into each LLM turn."""
-    now = datetime.now(ZoneInfo(tz))
+def current_time_text(tz: str, at: float) -> str:
+    """The local-time line injected before the user message sent at ``at``."""
+    sent = datetime.fromtimestamp(at, ZoneInfo(tz))
     return (
-        f"The current local time is {now.isoformat()} ({tz}). "
+        f"The user's last message was sent at {sent.isoformat()} ({tz} local time). "
         'Use it to resolve relative times such as "in 1 hour" or "tonight".'
     )
 

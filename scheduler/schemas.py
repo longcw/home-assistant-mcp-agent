@@ -105,11 +105,14 @@ class RunReport(BaseModel):
 
 
 class UserSettings(BaseModel):
-    """One person: the name their Shortcut sends, an optional HA login, their devices."""
+    """One person: the name their Shortcut sends, an optional HA login, their devices,
+    and what they may use."""
 
     name: str
     ha_user_id: Optional[str] = None
     notify_targets: list[str] = Field(default_factory=list)
+    # ids of the restricted MCP servers (mcp.yaml) the agent may use for this person
+    servers: list[str] = Field(default_factory=list)
 
     @field_validator("name")
     @classmethod

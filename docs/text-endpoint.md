@@ -7,7 +7,7 @@ Text runs on the **draft** session-persistence API of livekit-agents ([livekit/a
 ## Using it
 
 ```bash
-curl -X POST http://192.168.100.121:8952/chat \
+curl -X POST http://<agent-host>:8952/chat \
      -H "Authorization: Bearer $TEXT_API_TOKEN" \
      -H 'content-type: application/json' \
      -d '{"text": "客厅的灯开着吗？", "user": "alice"}'
@@ -32,10 +32,10 @@ The chat routes are registered before `@server.a2a_session`: the A2A binding mou
 
 ### Progress on the phone
 
-With `TEXT_LIVE_ACTIVITY` set to a phone's notify service (`mobile_app_long_s_iphone_air`), each turn's progress also goes to that phone, with no unlock needed to read it. Every push carries the tag `ha-text`, so each replaces the last instead of piling up. Steps show as `✓` done and `…` running, with arguments as plain values (`HassTurnOff · 背景灯 电视 左键`), then the answer. Tapping opens `TEXT_LIVE_URL`, the card's Text tab. `TEXT_LIVE_MODE` picks how:
+With `TEXT_LIVE_ACTIVITY` set to a phone's notify service (`mobile_app_my_iphone`), each turn's progress also goes to that phone, with no unlock needed to read it. Every push carries the tag `ha-text`, so each replaces the last instead of piling up. Steps show as `✓` done and `…` running, with arguments as plain values (`HassTurnOff · 背景灯 电视 左键`), then the answer. Tapping opens `TEXT_LIVE_URL`, the card's Text tab. `TEXT_LIVE_MODE` picks how:
 
 - `notification` (default): an ordinary notification titled with the question. The question and the answer pop with sound; each tool call is appended to the question's notification as a `passive` update without sound, so it never pops, and once that notification is gone it arrives quietly on its own. iOS alerts only once per tag, so the answer first sends `clear_notification` for the tag and then posts anew. Plain remote pushes, so it works with the app closed, but they can lag by a few seconds.
-- `activity` (set on fnOS): the agent only reports each turn's phases, `start` (the question), `progress` (each tool call) and `final` (the answer), to the HA integration's `POST /api/livekit_voice/progress` (in `ha-livekit-agent-frontend`, `progress.py`), with the HA token. That view runs inside Home Assistant, so it can read from mobile_app whether the phone's Live Activity for the tag is running — which the phone reports when an activity starts and withdraws when it is swiped away — and does the rest:
+- `activity`: the agent only reports each turn's phases, `start` (the question), `progress` (each tool call) and `final` (the answer), to the HA integration's `POST /api/livekit_voice/progress` (in `ha-livekit-agent-frontend`, `progress.py`), with the HA token. That view runs inside Home Assistant, so it can read from mobile_app whether the phone's Live Activity for the tag is running — which the phone reports when an activity starts and withdraws when it is swiped away — and does the rest:
   - `start` starts the activity, or updates the running one, and always alerts.
   - `progress` updates a running activity quietly; while a start is still waiting for the phone's token, it holds the latest update and sends it once the token appears (up to 20 seconds), since mobile_app sends an update for a tag it has no token for as another push-to-start; with no activity at all it is skipped.
   - `final` shows the answer on the activity, and sends it as a regular notification (tag `ha-text-answer`, cleared first so it pops, carrying the reply buttons). On a running activity the answer alerts there and the notification is quiet; otherwise, or when HA cannot tell, the notification sounds. The activity clears `TEXT_LIVE_CLEAR_AFTER` (900) seconds after the last turn.
@@ -53,10 +53,10 @@ The answer notification carries buttons: each quick reply the agent offered with
 `scripts/make_shortcut.py` builds a signed `.shortcut` file to import (it needs a Mac, for the `shortcuts sign` CLI):
 
 ```bash
-uv run --no-project python scripts/make_shortcut.py -o "Ask Home.shortcut" --token "$TEXT_API_TOKEN" --user alice
+uv run --no-project python scripts/make_shortcut.py -o "Ask Home.shortcut" --url http://<agent-host>:8952/chat --token "$TEXT_API_TOKEN" --user alice
 ```
 
-AirDrop the file to the iPhone, or open it on a Mac signed in to the same iCloud account, and import it. The import asks for the URL, the token and the person's name, prefilled with `--url` (default `http://192.168.100.121:8952/chat`, reachable at home or over Tailscale), `--token` and `--user`. The name is sent as `user` on every request; left empty, the shortcut talks as no one in particular. Without `--token` the file holds no secret and can be shared, so one file serves the whole family, each person typing their own name on import. The text it sends is its Shortcut Input, and the reply (tool calls, then the answer) is its output. From another shortcut: *Dictate Text* → *Run Shortcut* "Ask Home" with the dictated text as input → *Show Result* on its output. Run on its own, it asks for the text and shows the reply.
+AirDrop the file to the iPhone, or open it on a Mac signed in to the same iCloud account, and import it. The import asks for the URL, the token and the person's name, prefilled with `--url` (the agent's `/chat`, as the phone reaches it), `--token` and `--user`. The name is sent as `user` on every request; left empty, the shortcut talks as no one in particular. Without `--token` the file holds no secret and can be shared, so one file serves the whole family, each person typing their own name on import. The text it sends is its Shortcut Input, and the reply (tool calls, then the answer) is its output. From another shortcut: *Dictate Text* → *Run Shortcut* "Ask Home" with the dictated text as input → *Show Result* on its output. Run on its own, it asks for the text and shows the reply.
 
 ## How it works
 
@@ -111,6 +111,6 @@ Nothing else in the repo imports from `livekit.agents.store` or `livekit.agents.
 5. If the stored schema changed, the old SQLite files may no longer load (`SchemaVersionError`, or a failed turn). They hold only chat history, so start over with `?new=1`, or move `agent-data/` aside.
 6. If agent-db replaces SQLite, only `store = LocalStore(...)` and its `create_database()` call change; `AgentDB()` takes its URL and key from the environment.
 
-## Deploying (fnOS)
+## Deploying
 
-The stack lives at `/dockers/home-assistant-mcp-agent` on `192.168.100.121`. Check out the branch there, make sure `.env` has `TEXT_API_TOKEN`, then `docker compose up -d --build agent`. The build fetches the pinned commits from GitHub.
+On the Docker host, check out the branch, make sure `.env` has `TEXT_API_TOKEN`, then `docker compose up -d --build agent`. The build fetches the pinned commits from GitHub.

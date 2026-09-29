@@ -32,6 +32,7 @@ worker, install that integration, point both at the same LiveKit project, and yo
 ├── agent/            # Python LiveKit worker (uv)
 │   ├── src/          # main.py (entrypoint), agent.py, config.py, ha.py, scheduler_client.py, …
 │   ├── prompt.yaml   # system prompt (bind-mounted, edit without a rebuild)
+│   ├── mcp.yaml      # MCP servers besides Home Assistant's (bind-mounted too)
 │   ├── pyproject.toml
 │   └── Dockerfile
 ├── scheduler/        # task scheduler service (FastAPI + APScheduler)
@@ -73,8 +74,9 @@ The agent calls `load_dotenv()`, which walks up to the repo-root `.env`.
 | --- | --- |
 | `HA_URL` | Home Assistant base URL. `/api/mcp` is appended automatically. |
 | `HA_TOKEN` | Home Assistant long-lived access token (sent as a bearer token). |
-| `PARALLEL_API_KEY` | Optional [Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp) key for web search; the anonymous free tier works without one. `WEB_SEARCH_URL=` (empty) turns web search off. |
-| `MEM0_API_KEY` | Optional [Mem0](https://docs.mem0.ai/platform/mem0-mcp) key; set, the agent remembers preferences across conversations through Mem0's hosted MCP server. |
+| `PARALLEL_API_KEY` / `MEM0_API_KEY` / `HERDR_MCP_URL` | Keys and URLs of the optional MCP servers in `agent/mcp.yaml`; see [MCP servers](#mcp-servers). |
+| `CALLBACK_BASE_URL` | This agent's HTTP app as MCP servers reach it, e.g. `http://<agent-host>:8952`, for servers that report long tasks back. |
+| `AGENT_PROMPT` / `AGENT_MCP_CONFIG` | Your own copies of `agent/prompt.yaml` and `agent/mcp.yaml` for docker-compose to mount; `agent/*.local.yaml` is git-ignored. |
 | `AGENT_NAME` | Explicit-dispatch worker name (default `ha-agent`). Must match the integration's **Agent name**. |
 | `STT_IDLE_TIMEOUT` | Seconds after the mic is gated before STT is torn down to save cost (default `120`). |
 | `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | Your LiveKit server. |
@@ -83,6 +85,16 @@ The agent calls `load_dotenv()`, which walks up to the repo-root `.env`.
 Models default to Chinese-friendly choices and can be overridden via
 `STT_MODEL`, `STT_LANGUAGE`, `LLM_MODEL`, `TTS_MODEL`, `TTS_VOICE`, `TTS_LANGUAGE`
 (see `.env.example`).
+
+## MCP servers
+
+Home Assistant's MCP server is always connected. Any others are listed in `agent/mcp.yaml`, with keys taken from `.env` as `${VAR}`, so the file holds no secrets. A server whose keys are unset is skipped, so the agent runs with Home Assistant's tools alone. The shipped file lists three servers:
+
+- **Web search** ([Parallel Search](https://docs.parallel.ai/integrations/mcp/search-mcp)): `web_search` and `web_fetch`. The anonymous free tier works with no key.
+- **Memory** ([Mem0](https://docs.mem0.ai/platform/mem0-mcp)): preferences remembered across conversations, kept separate for each person. Needs `MEM0_API_KEY`.
+- **Coding agents** ([herdr-mcp-server](https://github.com/longcw/herdr-mcp-server)): start, check and prompt Claude Code sessions on a computer running herdr, so "用电脑…" or "on my computer…" requests and their follow-ups go to one session there. Needs `HERDR_MCP_URL`. It can run code there, so it is `restricted`: only people whose Settings entry lists `herdr` under `servers` get it.
+
+A server marked `callback: true` gets this agent's webhook in its `X-Callback-Url` and `X-Callback-Token` headers. When a task outlives its tool call, the server POSTs `{"source", "text"}` to `/chat/events`, and the agent tells the person in their text conversation, with tools off for that turn. This needs `CALLBACK_BASE_URL` and `TEXT_API_TOKEN`. The comments at the top of `mcp.yaml` describe every field. To add a server, add an entry there, or keep your own list in a copy that `AGENT_MCP_CONFIG` points at.
 
 ## Turn modes & session control
 

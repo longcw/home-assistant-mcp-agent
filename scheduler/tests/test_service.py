@@ -262,6 +262,11 @@ def test_settings_users(tmp_path):
     # updating one field keeps the other
     out = svc.update_settings(SettingsUpdate(notify_targets=["mobile_app_x"]))
     assert out.users[0].notify_targets == ["mobile_app_alice"]
+    # a restricted MCP server is off for a person until listed
+    assert out.users[0].servers == []
+    alice.servers = ["herdr"]
+    svc.update_settings(SettingsUpdate(users=[alice]))
+    assert svc.get_settings().users[0].servers == ["herdr"]
     with pytest.raises(ValueError):
         SettingsUpdate(users=[alice, UserSettings(name="alice")])
 

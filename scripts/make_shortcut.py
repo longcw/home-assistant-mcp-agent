@@ -143,7 +143,7 @@ def build(url: str, token: str, user: str) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("-o", "--output", default="Ask Home.shortcut")
-    parser.add_argument("--url", default="http://192.168.100.121:8952/chat")
+    parser.add_argument("--url", required=True, help="the agent's /chat endpoint")
     parser.add_argument("--token", default="")
     parser.add_argument("--user", default="")
     args = parser.parse_args()
