@@ -245,8 +245,8 @@ class HomeAssistantAgent(Agent):
     @function_tool
     async def suggest_replies(self, replies: list[str]) -> None:
         """Offer up to ~3 one-tap quick replies for your last question, e.g. Yes / No.
-        Call this when you ask a yes/no or short-choice question — especially when
-        confirming a schedule. Tapping a chip sends that text as the user's reply, so
+        Call this when you ask a yes/no or short-choice question. Tapping a chip
+        sends that text as the user's reply, so
         phrase each option in the user's language as a natural reply.
         This MUST be called only after the question is asked, not before.
         """
@@ -287,7 +287,7 @@ class HomeAssistantAgent(Agent):
     ) -> str:
         """Schedule a task to run later, once or on a recurring schedule.
 
-        ALWAYS confirm the resolved time and action with the user before calling this.
+        Schedule without asking first; if the user corrects it, cancel the wrong task.
 
         A task carries `steps` (concrete tool calls replayed exactly, in order) and/or
         an `instruction` (natural language run at fire time). Provide at least one:
@@ -395,7 +395,7 @@ class HomeAssistantAgent(Agent):
         enabled: bool | None = None,
     ) -> str:
         """Modify a scheduled task: change its time (run_at or cron), description, or
-        whether it is enabled. Confirm changes with the user first."""
+        whether it is enabled."""
         logger.info("update_scheduled_task: %s", task_id)
         try:
             payload: dict[str, Any] = {}
