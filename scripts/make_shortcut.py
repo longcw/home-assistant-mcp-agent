@@ -8,10 +8,10 @@ Run on a Mac (signing uses the `shortcuts` CLI):
 The URL, token and the person's name are asked for on import, prefilled with what is
 given here. The name keeps each family member's conversation, memories and phone
 apart: it matches a person in the card's Settings tab, and left empty the shortcut
-talks as no one in particular. The text
-to send is the shortcut's input: another shortcut passes it with Run Shortcut (after
-Dictate Text, say) and gets the reply back as output; run on its own, it asks for text
-and shows the reply.
+talks as no one in particular. It first stops the agent's running turn, so the agent
+goes quiet while you speak, then dictates what to send, or takes the shortcut's input
+when another shortcut passes one with Run Shortcut. It does not wait for the reply,
+which arrives as a Home Assistant notification.
 """
 
 import argparse
@@ -55,8 +55,40 @@ def dictionary(items: dict[str, dict]) -> dict:
     }
 
 
+def post(url: dict, token_id: str, body: dict[str, dict]) -> dict:
+    """A POST of ``body`` as JSON to ``url``, with the agent's bearer token."""
+    return {
+        "WFWorkflowActionIdentifier": "is.workflow.actions.downloadurl",
+        "WFWorkflowActionParameters": {
+            "WFURL": url,
+            "WFHTTPMethod": "POST",
+            "ShowHeaders": True,
+            "WFHTTPHeaders": dictionary(
+                {"Authorization": text(f"Bearer {OBJ}", output(token_id, "Text"))}
+            ),
+            "WFHTTPBodyType": "JSON",
+            "WFJSONValues": dictionary(body),
+        },
+    }
+
+
+def conditional(group: str, mode: int, **params: object) -> dict:
+    """One part of an If block: 0 opens it, 1 is Otherwise, 2 ends it."""
+    return {
+        "WFWorkflowActionIdentifier": "is.workflow.actions.conditional",
+        "WFWorkflowActionParameters": {
+            "GroupingIdentifier": group,
+            "WFControlFlowMode": mode,
+            **params,
+        },
+    }
+
+
 def build(url: str, token: str, user: str) -> dict:
-    url_id, token_id, user_id, get_id = (str(uuid.uuid4()).upper() for _ in range(4))
+    url_id, token_id, user_id, input_id, dictated_id, said_id, group = (
+        str(uuid.uuid4()).upper() for _ in range(7)
+    )
+    person = {"user": text(OBJ, output(user_id, "Text"))}
     actions = [
         {
             "WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
@@ -70,33 +102,40 @@ def build(url: str, token: str, user: str) -> dict:
             "WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
             "WFWorkflowActionParameters": {"UUID": user_id, "WFTextActionText": user},
         },
+        # the agent goes quiet at once, before the person starts speaking
+        post(text(f"{OBJ}/cancel", output(url_id, "Text")), token_id, person),
+        # text from a calling shortcut, or else what the person says now
+        conditional(
+            group,
+            0,
+            WFCondition=100,
+            WFInput={
+                "Type": "Variable",
+                "Variable": {
+                    "Value": SHORTCUT_INPUT,
+                    "WFSerializationType": "WFTextTokenAttachment",
+                },
+            },
+        ),
         {
-            "WFWorkflowActionIdentifier": "is.workflow.actions.downloadurl",
+            "WFWorkflowActionIdentifier": "is.workflow.actions.gettext",
             "WFWorkflowActionParameters": {
-                "UUID": get_id,
-                "WFURL": text(OBJ, output(url_id, "Text")),
-                "WFHTTPMethod": "POST",
-                "ShowHeaders": True,
-                "WFHTTPHeaders": dictionary(
-                    {"Authorization": text(f"Bearer {OBJ}", output(token_id, "Text"))}
-                ),
-                "WFHTTPBodyType": "JSON",
-                "WFJSONValues": dictionary(
-                    {
-                        "text": text(OBJ, SHORTCUT_INPUT),
-                        "user": text(OBJ, output(user_id, "Text")),
-                    }
-                ),
+                "UUID": input_id,
+                "WFTextActionText": text(OBJ, SHORTCUT_INPUT),
             },
         },
+        conditional(group, 1),
         {
-            # hands the reply to a calling shortcut, and shows it when there is none
-            "WFWorkflowActionIdentifier": "is.workflow.actions.output",
-            "WFWorkflowActionParameters": {
-                "WFOutput": text(OBJ, output(get_id, "Contents of URL")),
-                "WFNoOutputSurfaceBehavior": "Respond",
-            },
+            "WFWorkflowActionIdentifier": "is.workflow.actions.dictatetext",
+            "WFWorkflowActionParameters": {"UUID": dictated_id},
         },
+        conditional(group, 2, UUID=said_id),
+        # the reply is not waited for: it comes back as a notification
+        post(
+            text(OBJ, output(url_id, "Text")),
+            token_id,
+            {"text": text(OBJ, output(said_id, "If Result")), **person},
+        ),
     ]
     question = {"Category": "Parameter", "ParameterKey": "WFTextActionText"}
     return {
@@ -129,12 +168,6 @@ def build(url: str, token: str, user: str) -> dict:
             },
         ],
         "WFWorkflowInputContentItemClasses": ["WFStringContentItem"],
-        "WFWorkflowNoInputBehavior": {
-            "Name": "WFWorkflowNoInputBehaviorAskForInput",
-            "Parameters": {"ItemClass": "WFStringContentItem"},
-        },
-        "WFWorkflowOutputContentItemClasses": ["WFStringContentItem"],
-        "WFWorkflowHasOutputFallback": True,
         "WFWorkflowTypes": [],
         "WFWorkflowHasShortcutInputVariables": True,
     }

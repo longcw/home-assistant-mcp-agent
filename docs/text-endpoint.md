@@ -13,13 +13,16 @@ curl -X POST http://<agent-host>:8952/chat \
      -d '{"text": "客厅的灯开着吗？", "user": "alice"}'
 ```
 
-- The body is either JSON `{"text": "...", "new": false, "steps": true, "user": "..."}` or plain text. `?new=1`, `?steps=0` and `?user=` work too.
+- The body is either JSON `{"text": "...", "new": false, "wait": false, "steps": true, "user": "..."}` or plain text. `?new=1`, `?wait=1`, `?steps=0` and `?user=` work too.
+- By default it answers `202 accepted` as soon as the turn has started, and the turn runs on in the background: its progress and its answer go to the person's phone (below), and the card's Text tab shows it from the history. With `"wait": true` it answers with the agent's reply instead.
 - `user` names the family member speaking; the name is matched without regard to case. Each person has their own conversation and Mem0 memories, and gets notifications and phone progress on the devices ticked for them under People in the card's Settings tab (progress goes to the first ticked phone). A name not listed there still gets its own conversation and memories, with the default devices for notifications and no phone progress. Without `user` the request is no one in particular: the conversation, memories and `TEXT_LIVE_ACTIVITY` phone from before there were people. Through the HA integration (the card's Text tab) the HA login stands in for the name, once a person is linked to it.
-- The reply is plain text: one line per tool call the turn made (`→ HassTurnOn({"name": "客厅 灯"})`, plus `  … ` lines for a tool's progress reports), a blank line, then the agent's answer. `"steps": false` returns the answer alone, which suits *Speak Text*. A turn that started a new conversation begins with `(new conversation)`. The `X-Conversation-Id` header names the conversation.
-- The reply comes back whole, not streamed: an iPhone Shortcut's *Get Contents of URL* waits for the full body, so streamed output would show no sooner there. The step lines are how a turn's work is shown, and the phone progress below is how it is shown while it runs.
+- With `wait`, the reply is plain text: one line per tool call the turn made (`→ HassTurnOn({"name": "客厅 灯"})`, plus `  … ` lines for a tool's progress reports), a blank line, then the agent's answer. `"steps": false` returns the answer alone, which suits *Speak Text*. A turn that started a new conversation begins with `(new conversation)`. The `X-Conversation-Id` header names the conversation.
+- A new message replaces a turn still running: it stops that turn's speech and the calls that can be stopped, and nothing more of that turn reaches the phone. A tool the agent already moved to the background keeps running. `POST /chat/cancel` `{"user"}` stops the running turn the same way and answers at once, so a client calls it the moment the person starts speaking; `{"task_id"}` from the history stops only that turn, never a newer one.
 - A person's requests go into one conversation, so the agent remembers earlier turns, across restarts too, until a new one is asked for: `"new": true`, or the new-conversation button on the card's Text tab (with no `text` it only starts the new one). Setting `TEXT_RENEW_AFTER` to a number of seconds also starts one on its own after that long without a request; it is off by default.
 - A loaded conversation keeps only its latest `TEXT_MAX_ITEMS` (100) chat items in the agent's context, cut with `ChatContext.truncate()` each time it loads. The session's own history, which the model never reads and the Text tab shows, is not cut; it grows by a few items per turn until a new conversation starts.
-- A reply is capped at `TEXT_REPLY_TIMEOUT` (80 s), under the reverse proxy's 90 s read timeout. A turn that runs out is cancelled and returns whatever the agent had said so far.
+- `wait` is capped at `TEXT_REPLY_TIMEOUT` (80 s), under the reverse proxy's 90 s read timeout. When it runs out, only the waiting stops: the request answers `[timeout] still working`, and the turn runs on and still sends its answer to the phone.
+- A conversation not used for `TEXT_IDLE_TIMEOUT` is saved and unloaded, and loading it again takes a few seconds (mostly MCP connects). `POST /chat/warm` `{"user"}` loads the person's current conversation ahead of their message, with no turn, and `/chat/cancel` does the same, since a client calls it as the person starts to speak.
+- `POST /chat/events` `{"source", "text"}` takes an update from an MCP server's webhook into the person's conversation, e.g. a Claude Code session that finished. It waits for a running turn rather than replacing it, and the agent answers it with no tools.
 - Both endpoints need `TEXT_API_TOKEN` as a bearer token; with it unset, neither is mounted.
 
 ### History, and the card's Text tab
@@ -58,7 +61,7 @@ The answer notification carries buttons: each quick reply the agent offered with
 uv run --no-project python scripts/make_shortcut.py -o "Ask Home.shortcut" --url http://<agent-host>:8952/chat --token "$TEXT_API_TOKEN" --user alice
 ```
 
-AirDrop the file to the iPhone, or open it on a Mac signed in to the same iCloud account, and import it. The import asks for the URL, the token and the person's name, prefilled with `--url` (the agent's `/chat`, as the phone reaches it), `--token` and `--user`. The name is sent as `user` on every request; left empty, the shortcut talks as no one in particular. Without `--token` the file holds no secret and can be shared, so one file serves the whole family, each person typing their own name on import. The text it sends is its Shortcut Input, and the reply (tool calls, then the answer) is its output. From another shortcut: *Dictate Text* → *Run Shortcut* "Ask Home" with the dictated text as input → *Show Result* on its output. Run on its own, it asks for the text and shows the reply.
+AirDrop the file to the iPhone, or open it on a Mac signed in to the same iCloud account, and import it. The import asks for the URL, the token and the person's name, prefilled with `--url` (the agent's `/chat`, as the phone reaches it), `--token` and `--user`. The name is sent as `user` on every request; left empty, the shortcut talks as no one in particular. Without `--token` the file holds no secret and can be shared, so one file serves the whole family, each person typing their own name on import. Run on its own, it first calls `POST /chat/cancel`, so the agent stops at once, then dictates what you say and sends it without waiting; the answer arrives as the Home Assistant notification. Run from another shortcut with text as its input, it sends that text instead of dictating.
 
 ## How it works
 
@@ -76,7 +79,7 @@ POST /chat  ──►  bridge (A2AClient)  ──►  /home-assistant  (A2A endp
 
 The framework saves a session **once, when it closes**. Here that is:
 
-- after `TEXT_IDLE_TIMEOUT` seconds (300) with no request, when the endpoint drops the context;
+- after `TEXT_IDLE_TIMEOUT` seconds (1800) with no request, when the endpoint drops the context;
 - when a new conversation replaces it (`"new": true`, or `TEXT_RENEW_AFTER` when set; the bridge sends the A2A goodbye first);
 - on a graceful shutdown (`docker compose stop`/`restart`; `stop_grace_period: 30s` in the compose file).
 

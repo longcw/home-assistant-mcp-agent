@@ -15,6 +15,7 @@ import logging
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
 from fastapi import Request
@@ -83,6 +84,34 @@ async def _items(conversation_id: str) -> list:
             await stored.release()
 
 
+class _Turn:
+    """One message's turn, read to its end in the background."""
+
+    def __init__(self, stream: TaskStream, text: str) -> None:
+        self.stream = stream
+        # what the person sent, shown until the session has recorded it
+        self.text = text
+        self.sent_at = time.time()
+        # a newer message or a stop took over: nothing it does reaches the phone
+        self.quiet = False
+        self.reader: asyncio.Task[None] | None = None
+        # its step lines and its answer, for a sender that waits for them
+        self.reply: asyncio.Future[tuple[list[str], str]] = (
+            asyncio.get_running_loop().create_future()
+        )
+
+    @property
+    def running(self) -> bool:
+        return self.reader is not None and not self.reader.done()
+
+    async def acked(self, timeout: float = 5) -> None:
+        """Wait until the server has named the task, which its first event does."""
+        for _ in range(int(timeout / 0.1)):
+            if self.stream.task_id or not self.running:
+                return
+            await asyncio.sleep(0.1)
+
+
 class _Conversation:
     """One person's conversation, kept until renewed or left idle."""
 
@@ -103,10 +132,10 @@ class _Conversation:
         self._actions: dict[str, str] = {}
         self._reply_action = ""
         self._listener: asyncio.Task[None] | None = None
-        self._tapped: set[asyncio.Task[object]] = set()
-        # the running turn, for cancel(); its task id is set by its first event
-        self._stream: TaskStream | None = None
-        self._stopping = False
+        # background work: notification taps, and the cancels of superseded turns
+        self._chores: set[asyncio.Task[object]] = set()
+        # the latest turn; its task id is set by its first event
+        self._turn: _Turn | None = None
 
     async def _open(self, renew: bool) -> tuple[A2AClient, str, bool]:
         """The client for this turn, its conversation, and whether that one is new."""
@@ -138,109 +167,180 @@ class _Conversation:
         return self._client, self._conversation_id, started
 
     async def send(
-        self, text: str, *, renew: bool = False, steps: bool = True
+        self,
+        text: str,
+        *,
+        renew: bool = False,
+        steps: bool = True,
+        wait: bool = False,
+        interrupt: bool = True,
     ) -> tuple[str, str]:
-        """Send one user turn and return (conversation id, the agent's reply).
+        """Start one user turn and return (conversation id, what to answer the sender).
 
-        With ``steps``, the reply is preceded by one line per tool call the turn made.
+        The turn is read to its end in the background, and its answer goes to the
+        person's phone. With ``wait``, the answer is returned too, preceded with
+        ``steps`` by one line per tool call. With ``interrupt``, the turn replaces a
+        running one; without, it starts once that one has ended.
         """
+        while not interrupt and self._turn is not None and self._turn.running:
+            # an update never cuts the person off: it waits for their turn to end
+            await asyncio.wait([self._turn.reader])
         async with self._lock:
+            if (previous := self._turn) is not None:
+                if interrupt:
+                    self._stop(previous, "superseded by a new message")
+                # a context's messages are ordered only once the previous one has a task
+                await previous.acked()
             client, conversation_id, started = await self._open(renew)
             if not text:
                 return conversation_id, "Started a new conversation."
             _record(conversation_id, self._user, text)
-            suggested = _suggested.setdefault(conversation_id, [])
-            suggested.clear()
+            _suggested.setdefault(conversation_id, []).clear()
             self._progress.target = await scheduler.phone(self._user)
-            live = self._progress if self._progress.target else None
-            if live:
-                live.begin(text)
+            if self._progress.target:
+                self._progress.begin(text)
                 if self._listener is None or self._listener.done():
                     self._listener = asyncio.create_task(self._listen())
-            lines = ["(new conversation)"] if steps and started else []
-            said: list[str] = []
-            answer, ok = "", True
             task_input = TaskInput(text=text, conversation_id=conversation_id)
-            async with client.send(task_input) as stream:
-                self._stream, self._stopping = stream, False
-                try:
-                    async with asyncio.timeout(settings.text_reply_timeout):
-                        async for update in stream:
-                            item = update.item
-                            if item is None or item.type != "function_call":
-                                if update.text:
-                                    said.append(update.text)
-                            elif item.update_of:
-                                # a tool's progress report is a call naming the call it
-                                # reports on, with the report as the update's text
-                                lines.append(f"  … {update.text}")
-                                if live:
-                                    live.report(update.text)
-                            else:
-                                try:
-                                    args = json.loads(item.arguments or "{}")
-                                except ValueError:
-                                    args = item.arguments
-                                shown = json.dumps(args, ensure_ascii=False)
-                                shown = shown.removeprefix("{}")[:120]
-                                lines.append(f"→ {item.name}({shown})")
-                                if live:
-                                    live.step(item.name, args)
-                            if update.state != "working":
-                                answer = update.text or (said[-1] if said else "")
-                                if update.state in ("failed", "canceled"):
-                                    answer, ok = f"[{update.state}] {answer}", False
-                                break
-                        else:
-                            # a cancelled task can close its stream with no last word
-                            state = "canceled" if self._stopping else "ended"
-                            answer = "\n".join([f"[{state}]", *said])
-                            ok = False
-                except TimeoutError:
-                    await stream.cancel("the text client stopped waiting")
-                    answer = "\n".join(["[timeout] still working", *said])
-                    ok = False
-                finally:
-                    self._stream = None
-            if live:
-                # the suggested replies become buttons, and Reply takes free text
-                nonce = uuid.uuid4().hex[:8]
-                replies = list(dict.fromkeys(suggested))[:4]
-                self._actions = {
-                    f"HATEXT_{nonce}_{i}": r for i, r in enumerate(replies)
-                }
-                self._reply_action = f"HATEXT_{nonce}_REPLY"
-                # a tap can control the house, so it asks for Face ID first
-                actions = [
-                    {"action": k, "title": r, "authenticationRequired": True}
-                    for k, r in self._actions.items()
-                ]
-                actions.append(
-                    {
-                        "action": self._reply_action,
-                        "title": "Reply",
-                        "behavior": "textInput",
-                        "textInputButtonTitle": "Send",
-                        "authenticationRequired": True,
-                    }
-                )
-                live.finish(answer, ok=ok, actions=actions)
-            if not steps:
-                lines = []
-            elif lines:
-                lines.append("")
-            return conversation_id, "\n".join([*lines, answer])
+            turn = self._turn = _Turn(client.send(task_input), text)
+            turn.reader = asyncio.create_task(self._read(turn, conversation_id))
+        if not wait:
+            return conversation_id, "accepted"
+        try:
+            lines, answer = await asyncio.wait_for(
+                asyncio.shield(turn.reply), settings.text_reply_timeout
+            )
+        except TimeoutError:
+            # only the waiting stops: the turn runs on and its answer still goes out
+            return conversation_id, "[timeout] still working"
+        if not steps:
+            return conversation_id, answer
+        lines = ["(new conversation)", *lines] if started else lines
+        return conversation_id, "\n".join([*lines, "", answer] if lines else [answer])
 
-    async def cancel(self, task_id: str | None) -> bool:
-        """Stop the running turn; naming its task never stops a newer one."""
-        stream = self._stream
-        if stream is None or not stream.task_id:
+    async def _read(self, turn: _Turn, conversation_id: str) -> None:
+        """Read a turn's updates to its end: its steps, then its answer."""
+        live = self._progress if self._progress.target else None
+        lines: list[str] = []
+        said: list[str] = []
+        answer, ok = "", True
+        try:
+            async with turn.stream as stream:
+                async for update in stream:
+                    live = None if turn.quiet else live
+                    item = update.item
+                    if item is None or item.type != "function_call":
+                        if update.text:
+                            said.append(update.text)
+                    elif item.update_of:
+                        # a tool's progress report is a call naming the call it reports
+                        # on, with the report as the update's text
+                        lines.append(f"  … {update.text}")
+                        if live:
+                            live.report(update.text)
+                    else:
+                        try:
+                            args = json.loads(item.arguments or "{}")
+                        except ValueError:
+                            args = item.arguments
+                        shown = json.dumps(args, ensure_ascii=False)
+                        lines.append(f"→ {item.name}({shown.removeprefix('{}')[:120]})")
+                        if live:
+                            live.step(item.name, args)
+                    if update.state != "working":
+                        answer = update.text or (said[-1] if said else "")
+                        if update.state in ("failed", "canceled"):
+                            answer, ok = f"[{update.state}] {answer}", False
+                        break
+                else:
+                    # a cancelled task can close its stream with no last word
+                    state = "canceled" if turn.quiet else "ended"
+                    answer = "\n".join([f"[{state}]", *said])
+                    ok = False
+        except Exception as exc:  # noqa: BLE001 - a failed turn still answers
+            logger.exception("text turn failed")
+            answer, ok = f"[error] {exc}", False
+        finally:
+            if not turn.reply.done():
+                turn.reply.set_result((lines, answer))
+        if turn.quiet or self._progress.target == "":
+            return
+        # the suggested replies become buttons, and Reply takes free text
+        nonce = uuid.uuid4().hex[:8]
+        replies = list(dict.fromkeys(_suggested.get(conversation_id, [])))[:4]
+        self._actions = {f"HATEXT_{nonce}_{i}": r for i, r in enumerate(replies)}
+        self._reply_action = f"HATEXT_{nonce}_REPLY"
+        # a tap can control the house, so it asks for Face ID first
+        actions = [
+            {"action": k, "title": r, "authenticationRequired": True}
+            for k, r in self._actions.items()
+        ]
+        actions.append(
+            {
+                "action": self._reply_action,
+                "title": "Reply",
+                "behavior": "textInput",
+                "textInputButtonTitle": "Send",
+                "authenticationRequired": True,
+            }
+        )
+        self._progress.finish(answer, ok=ok, actions=actions)
+
+    def _stop(self, turn: _Turn | None, reason: str) -> bool:
+        """Silence a running turn now and cancel its task in the background."""
+        if turn is None or not turn.running or turn.quiet:
             return False
-        if task_id and task_id != stream.task_id:
+        # before its session has started a turn has done nothing to stop, and a cancel
+        # then would stop the start itself, and every later turn with it
+        if self._conversation_id not in _live:
             return False
-        self._stopping = True
-        await stream.cancel("stopped by the user")
+        turn.quiet = True
+        chore = asyncio.create_task(self._cancel(turn, reason))
+        self._chores.add(chore)
+        chore.add_done_callback(self._chores.discard)
         return True
+
+    async def _cancel(self, turn: _Turn, reason: str) -> None:
+        # the task has no id to cancel by until its first event arrives
+        await turn.acked()
+        if turn.running and turn.stream.task_id:
+            with contextlib.suppress(Exception):
+                await turn.stream.cancel(reason)
+
+    def warm(self, executor: Any) -> bool:
+        """Load the current conversation's session in the background, with no turn, so
+        the next message does not wait for it; False when there is nothing to load."""
+        conversation_id = self._current()
+        if conversation_id is None or conversation_id in _live or self._lock.locked():
+            return False
+        if settings.text_renew_after > 0 and self._current_file.exists():
+            idle = time.time() - self._current_file.stat().st_mtime
+            if idle > settings.text_renew_after:
+                return False  # the next message starts a new conversation instead
+        _owners[conversation_id] = self._user
+        # the endpoint's own start of a context, as its first request would make it
+        task_input = TaskInput(text="", conversation_id=conversation_id)
+        held = executor._context(conversation_id, task_input)
+        chore = asyncio.create_task(self._warm(held, conversation_id))
+        self._chores.add(chore)
+        chore.add_done_callback(self._chores.discard)
+        return True
+
+    async def _warm(self, held: Any, conversation_id: str) -> None:
+        logger.info("warming text conversation %s", conversation_id)
+        try:
+            # shielded, as a cancelled warm-up must not cancel the start a turn shares
+            await asyncio.shield(held.runner())
+        except Exception:
+            logger.exception("could not warm text conversation %s", conversation_id)
+
+    def cancel(self, task_id: str | None) -> bool:
+        """Stop the running turn in the background; naming a task never stops a newer
+        one."""
+        turn = self._turn
+        if turn is None or (task_id and task_id != turn.stream.task_id):
+            return False
+        return self._stop(turn, "stopped by the user")
 
     async def _listen(self) -> None:
         """Send a tap on the latest answer's buttons into the conversation."""
@@ -253,8 +353,8 @@ class _Conversation:
             if reply:
                 logger.info("reply from a notification: %s", reply)
                 task = asyncio.create_task(self.send(reply))
-                self._tapped.add(task)
-                task.add_done_callback(self._tapped.discard)
+                self._chores.add(task)
+                task.add_done_callback(self._chores.discard)
 
     def _current(self) -> str | None:
         if self._conversation_id is None and self._current_file.exists():
@@ -299,7 +399,8 @@ class _Conversation:
 
     async def switch(self, conversation_id: str) -> bool:
         """Make one of this person's conversations the current one."""
-        if not self._owns(conversation_id) or self._lock.locked():
+        busy = self._turn is not None and self._turn.running
+        if not self._owns(conversation_id) or busy or self._lock.locked():
             return False
         async with self._lock:
             if conversation_id == self._current():
@@ -346,6 +447,7 @@ class _Conversation:
             conversation_id = current
         items = await _items(conversation_id) if conversation_id else []
         live = conversation_id == current
+        turn = self._turn if self._turn is not None and self._turn.running else None
 
         outputs = {i.call_id: i for i in items if i.type == "function_call_output"}
         shown: list[dict[str, object]] = []
@@ -388,12 +490,29 @@ class _Conversation:
                 shown.append(action)
                 if item.name == "suggest_replies" and isinstance(args, dict):
                     suggestions = [str(r) for r in args.get("replies") or []]
+        if (
+            live
+            and turn is not None
+            and not any(
+                i["kind"] == "message"
+                and i["role"] == "user"
+                and i["text"] == turn.text
+                and int(i["ts"]) >= int(turn.sent_at * 1000) - 1000
+                for i in shown
+            )
+        ):
+            # a conversation still loading has not recorded the message yet
+            shown.append(
+                {"kind": "message", "id": f"pending-{int(turn.sent_at * 1000)}"}
+                | {"role": "user", "text": turn.text, "ts": int(turn.sent_at * 1000)}
+            )
+            suggestions = []
         return {
             "conversation_id": conversation_id,
             "current": live,
-            "busy": live and self._lock.locked(),
+            "busy": live and turn is not None,
             # the running turn's task, which POST /chat/cancel takes
-            "task_id": self._stream.task_id or None if live and self._stream else None,
+            "task_id": turn.stream.task_id or None if live and turn else None,
             "items": shown[-limit:],
             "suggestions": suggestions,
         }
@@ -554,6 +673,8 @@ def mount(server: AgentServer) -> None:
         return await call_next(request)
 
     conversations: dict[str | None, _Conversation] = {}
+    # this endpoint's A2A executor, found once the binding below is mounted
+    executor: Any = None
 
     async def conversation_for(name: object, ha_user_id: object) -> _Conversation:
         """The conversation of the person a request names, or its HA login's."""
@@ -570,15 +691,19 @@ def mount(server: AgentServer) -> None:
 
     @server.http.post(CHAT_PATH)
     async def chat(request: Request) -> Response:
-        """Take `{"text", "new", "steps", "user"}` JSON or plain text; reply in text."""
+        """Take `{"text", "new", "steps", "wait", "user"}` JSON or plain text.
+
+        Answers 202 once the turn has started, and the answer goes to the person's
+        phone; with `wait` it answers with the agent's reply instead."""
         body = (await request.body()).decode().strip()
-        text, renew, steps = body, False, True
+        text, renew, steps, wait = body, False, True, False
         data: dict[str, object] = {}
         if request.headers.get("content-type", "").startswith("application/json"):
             data = json.loads(body or "{}")
             text = str(data.get("text") or "").strip()
             renew = bool(data.get("new"))
             steps = bool(data.get("steps", True))
+            wait = bool(data.get("wait"))
         query = request.query_params
         conversation = await conversation_for(
             data.get("user") or query.get("user"),
@@ -586,16 +711,19 @@ def mount(server: AgentServer) -> None:
         )
         renew = renew or query.get("new", "") in ("1", "true", "yes")
         steps = steps and query.get("steps", "") not in ("0", "false", "no")
+        wait = wait or query.get("wait", "") in ("1", "true", "yes")
         if not text and not renew:
             return PlainTextResponse("no text given", status_code=400)
         try:
             conversation_id, reply = await conversation.send(
-                text, renew=renew, steps=steps
+                text, renew=renew, steps=steps, wait=wait
             )
         except Exception as exc:
             logger.exception("text chat failed")
             return PlainTextResponse(f"[error] {exc}", status_code=502)
-        return PlainTextResponse(reply, headers={"X-Conversation-Id": conversation_id})
+        status = 200 if wait or not text else 202
+        headers = {"X-Conversation-Id": conversation_id}
+        return PlainTextResponse(reply, status_code=status, headers=headers)
 
     @server.http.get(f"{CHAT_PATH}/history")
     async def chat_history(
@@ -638,12 +766,25 @@ def mount(server: AgentServer) -> None:
 
     @server.http.post(f"{CHAT_PATH}/cancel")
     async def chat_cancel(request: Request) -> JSONResponse:
-        """Stop a person's running turn: `{"task_id", "user"}`, task from history."""
+        """Stop a person's running turn, answering at once: `{"task_id", "user"}`, the
+        task from history, or none for whichever runs."""
         body = (await request.body()).decode().strip()
         data = json.loads(body or "{}")
         conversation = await conversation_for(data.get("user"), data.get("ha_user_id"))
         task_id = str(data.get("task_id") or "") or None
-        return JSONResponse({"cancelled": await conversation.cancel(task_id)})
+        cancelled = conversation.cancel(task_id)
+        # a client cancels as the person starts to speak, so their message is coming
+        return JSONResponse(
+            {"cancelled": cancelled, "warming": conversation.warm(executor)}
+        )
+
+    @server.http.post(f"{CHAT_PATH}/warm")
+    async def chat_warm(request: Request) -> JSONResponse:
+        """Load a person's current conversation ahead of their message: `{"user"}`."""
+        body = (await request.body()).decode().strip()
+        data = json.loads(body or "{}")
+        conversation = await conversation_for(data.get("user"), data.get("ha_user_id"))
+        return JSONResponse({"warming": conversation.warm(executor)})
 
     updates: set[asyncio.Task[object]] = set()
 
@@ -662,7 +803,7 @@ def mount(server: AgentServer) -> None:
         logger.info("update from %s: %s", source, text[:120])
         # answered in the background, so the sender is not held for a whole turn
         turn = asyncio.create_task(
-            conversation.send(f"{UPDATE_PREFIX} {source}: {text}", steps=False)
+            conversation.send(f"{UPDATE_PREFIX} {source}: {text}", interrupt=False)
         )
         updates.add(turn)
         turn.add_done_callback(updates.discard)
@@ -681,10 +822,15 @@ def mount(server: AgentServer) -> None:
         agent._suggest_replies_cb = suggested.extend
         # None when the caller names no conversation, which then lives in memory only
         await session.start(agent=agent, persist=ctx.persisted)
-        _live[ctx.context_id] = session
-        session.on("close", lambda _: _live.pop(ctx.context_id, None))
         # a loaded conversation keeps only its latest items, so the prompt stays bounded
         await agent.update_chat_ctx(
             agent.chat_ctx.copy().truncate(max_items=settings.text_max_items)
         )
         ctx.attach(session)
+        # last, with nothing awaited after it: until then a cancel is a no-op, since
+        # cancelling while this handler runs would stop it
+        _live[ctx.context_id] = session
+        session.on("close", lambda _: _live.pop(ctx.context_id, None))
+
+    # a2a_session returns the handler, not its executor, so that is found by name
+    executor = next(e for e in server._a2a_sessions if e._endpoint == A2A_ENDPOINT)

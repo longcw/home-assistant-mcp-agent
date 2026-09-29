@@ -66,7 +66,7 @@ class Settings:
     text_live_url: str
     # Seconds after the last text turn before a Live Activity is cleared.
     text_live_clear_after: float
-    # Upper bound on one text reply, kept under the reverse proxy's 90 s read timeout.
+    # Seconds a waiting /chat request waits for its reply, under the proxy's 90 s.
     text_reply_timeout: float
 
 
@@ -92,7 +92,7 @@ def load_settings() -> Settings:
         http_port=int(os.getenv("HTTP_PORT", "8081")),
         text_api_token=os.getenv("TEXT_API_TOKEN", ""),
         text_data_dir=os.getenv("TEXT_DATA_DIR", "/data"),
-        text_idle_timeout=float(os.getenv("TEXT_IDLE_TIMEOUT", "300")),
+        text_idle_timeout=float(os.getenv("TEXT_IDLE_TIMEOUT", "1800")),
         text_renew_after=float(os.getenv("TEXT_RENEW_AFTER", "0")),
         text_max_items=int(os.getenv("TEXT_MAX_ITEMS", "100")),
         text_live_activity=os.getenv("TEXT_LIVE_ACTIVITY", ""),
