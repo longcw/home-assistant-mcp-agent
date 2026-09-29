@@ -3,6 +3,7 @@ import json
 import logging
 from typing import Any
 
+import httpx
 from livekit import api, rtc
 from livekit.agents import (
     AgentServer,
@@ -33,37 +34,17 @@ from utils import parse_job_metadata, truncate
 logger = logging.getLogger("ha-mcp-agent")
 
 
-# --- Headless scheduled execution ---
+# --- Scheduled execution ---
 # When the scheduler fires a task it dispatches this worker with `kind: "scheduled"` job
-# metadata. The entrypoint routes it to run_scheduled_task, which runs headlessly (no
-# mic / STT / TTS / user), reports the outcome, notifies Home Assistant, and tears the
-# room down.
+# metadata. The entrypoint routes it to run_scheduled_task, which replays a reminder's
+# steps, sends an instruction as a turn in the person's text conversation, reports the
+# outcome, notifies Home Assistant, and tears the room down.
 
 
 async def _run_instruction(
-    ctx: JobContext,
-    agent: HomeAssistantAgent,
-    text: str,
-    prior: list[tuple[str, str]] | None = None,
+    ctx: JobContext, agent: HomeAssistantAgent, text: str
 ) -> str:
-    """Run a natural-language instruction as a full text-only turn (no STT/TTS).
-
-    session.run captures the whole turn — tool calls included — not just one reply. When
-    ``prior`` deterministic step results are given, they're seeded into the turn so the
-    LLM summarizes / builds on them instead of redoing the work.
-    """
-    if prior:
-        seeded = "\n".join(f"- {tool} -> {out}" for tool, out in prior)
-        user_input = (
-            "You already ran these tools for the user and got these results:\n"
-            f"{seeded}\n\n"
-            f"Task: {text}\n\n"
-            "Use the results above where relevant; only call tools again if you still "
-            "need more information."
-        )
-    else:
-        user_input = text
-
+    """Run an instruction as a headless text-only turn, for when text chat is off."""
     session = AgentSession(llm=inference.LLM(settings.llm_model), max_tool_steps=8)
     await session.start(
         agent=agent,
@@ -74,7 +55,7 @@ async def _run_instruction(
     )
 
     async def _finish() -> Any:
-        return await session.run(user_input=user_input)
+        return await session.run(user_input=text)
 
     try:
         result = await asyncio.wait_for(
@@ -99,9 +80,7 @@ async def _run_function_call(agent: HomeAssistantAgent, tool: str, args: dict) -
     async def _finish() -> Any:
         return await execute_function_call(call, tool_ctx)
 
-    res = await asyncio.wait_for(
-        _finish(), timeout=settings.scheduled_run_timeout
-    )
+    res = await asyncio.wait_for(_finish(), timeout=settings.scheduled_run_timeout)
     out = res.fnc_call_out
     if out.is_error:
         raise RuntimeError(out.output)
@@ -146,13 +125,39 @@ async def run_scheduled_task(ctx: JobContext, meta: dict[str, Any]) -> None:
     status = "success"
     result = ""
     ran_instruction = False
+    # the person's phone already shows a conversation turn's answer
+    answered = False
     steps: list[ToolCall] = []
     try:
         steps = [ToolCall.model_validate(s) for s in (execution.get("steps") or [])]
         step_results = await _run_steps(agent, steps)
-        if instruction:
+        if instruction and settings.text_api_token:
+            # a turn in the person's own conversation, so the agent resolves devices
+            # now, sees a failing tool and can retry, and the person can follow up
             ran_instruction = True
-            result = await _run_instruction(ctx, agent, instruction, prior=step_results)
+            # it may first wait out the person's running turn, then for the reply
+            timeout = settings.scheduled_run_timeout + settings.text_reply_timeout
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    f"http://127.0.0.1:{settings.http_port}{text_chat.CHAT_PATH}",
+                    headers={"Authorization": f"Bearer {settings.text_api_token}"},
+                    json={
+                        "text": f"[Scheduled task due: {description}] {instruction}",
+                        "user": user,
+                        "steps": False,
+                        "wait": True,
+                        # a task firing mid-conversation waits for the person's turn
+                        "interrupt": False,
+                    },
+                )
+                resp.raise_for_status()
+            result = resp.text
+            answered = bool(await scheduler.phone(user))
+            if result.startswith(("[failed]", "[canceled]", "[ended]", "[error]")):
+                raise RuntimeError(result)
+        elif instruction:
+            ran_instruction = True
+            result = await _run_instruction(ctx, agent, instruction)
         elif step_results:
             # Pure deterministic batch: record what ran (raw tool outputs) for history.
             result = "\n".join(f"{tool}: {out}" for tool, out in step_results)
@@ -168,12 +173,12 @@ async def run_scheduled_task(ctx: JobContext, meta: dict[str, Any]) -> None:
 
     # A task whose steps already notify the user (e.g. a reminder, built on
     # send_notification) shouldn't also get a "task done" notification on top.
-    self_notified = any(s.tool == "send_notification" for s in steps)
-    if status == "error":
+    self_notified = answered or any(s.tool == "send_notification" for s in steps)
+    if status == "error" and not answered:
         targets = await scheduler.notify_targets(user)
         message = f"{description}\n\nError: {result}".strip()
         await ha.notify(message, title="Scheduled task failed", targets=targets)
-    elif not self_notified:
+    elif status == "success" and not self_notified:
         # An instruction's result is the assistant's natural-language reply, worth
         # showing; a pure batch's is raw tool output, so notify with just description.
         if ran_instruction and result:

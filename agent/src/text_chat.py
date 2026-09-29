@@ -729,12 +729,12 @@ def mount(server: AgentServer) -> None:
 
     @server.http.post(CHAT_PATH)
     async def chat(request: Request) -> Response:
-        """Take `{"text", "new", "steps", "wait", "user"}` JSON or plain text.
+        """Take `{"text", "new", "steps", "wait", "interrupt", "user"}` JSON or text.
 
         Answers 202 once the turn has started, and the answer goes to the person's
         phone; with `wait` it answers with the agent's reply instead."""
         body = (await request.body()).decode().strip()
-        text, renew, steps, wait = body, False, True, False
+        text, renew, steps, wait, interrupt = body, False, True, False, True
         data: dict[str, object] = {}
         if request.headers.get("content-type", "").startswith("application/json"):
             data = json.loads(body or "{}")
@@ -742,6 +742,7 @@ def mount(server: AgentServer) -> None:
             renew = bool(data.get("new"))
             steps = bool(data.get("steps", True))
             wait = bool(data.get("wait"))
+            interrupt = bool(data.get("interrupt", True))
         query = request.query_params
         conversation = await conversation_for(
             data.get("user") or query.get("user"),
@@ -754,7 +755,7 @@ def mount(server: AgentServer) -> None:
             return PlainTextResponse("no text given", status_code=400)
         try:
             conversation_id, reply = await conversation.send(
-                text, renew=renew, steps=steps, wait=wait
+                text, renew=renew, steps=steps, wait=wait, interrupt=interrupt
             )
         except Exception as exc:
             logger.exception("text chat failed")

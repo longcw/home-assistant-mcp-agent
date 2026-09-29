@@ -23,10 +23,12 @@ This service holds **no** Home Assistant credentials — all HA access stays in 
 
 ## Execution kinds
 
-- `function_call` — a frozen Home Assistant MCP tool + args, replayed deterministically at
-  fire time (no LLM). Best for concrete device actions.
-- `command` — a natural-language instruction the LLM re-interprets at fire time. Best for
-  conditional/complex tasks.
+A task's `execution` is `{steps, instruction}`:
+
+- `steps` — tool calls + args replayed exactly at fire time (no LLM), stopping at the first
+  failure. The agent uses them for reminders (one `send_notification`).
+- `instruction` — the action to do at fire time, sent as a message in the person's text
+  conversation, so the agent resolves devices then, sees a failing tool and can retry.
 
 ## API
 

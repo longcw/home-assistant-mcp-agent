@@ -32,7 +32,7 @@ class ScheduleSpec(BaseModel):
 
 
 class ToolCall(BaseModel):
-    """One deterministic tool call (agent or MCP tool + args) replayed at fire time."""
+    """One tool call (e.g. a reminder's send_notification) replayed at fire time."""
 
     tool: str
     args: dict[str, Any] = Field(default_factory=dict)
@@ -41,10 +41,10 @@ class ToolCall(BaseModel):
 class ExecutionSpec(BaseModel):
     """What a task does, in one shape:
 
-    - ``steps``: an ordered list of concrete tool calls, replayed deterministically. They run
-      in order and stop at the first failure.
-    - ``instruction``: a natural-language instruction the LLM runs (via ``session.run``) after
-      the steps — seeing their results — to summarize and/or chain further tool calls.
+    - ``steps``: an ordered list of concrete tool calls, replayed exactly. They run in order
+      and stop at the first failure; the agent uses them for reminders only.
+    - ``instruction``: what to do at fire time, sent after the steps as a message in the
+      person's text conversation, where the agent carries it out.
 
     At least one of the two must be present.
     """

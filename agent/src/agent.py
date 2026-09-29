@@ -31,14 +31,12 @@ logger = logging.getLogger("ha-mcp-agent")
 
 
 class ToolCall(BaseModel):
-    """One deterministic tool call in a scheduled task: a tool name + its arguments."""
+    """One tool call a scheduled task replays exactly: a tool name + its arguments."""
 
-    tool: str = Field(
-        description="Tool to call — one of your available tools, e.g. 'HassTurnOn'."
-    )
+    tool: str = Field(description="Tool to call: 'send_notification'.")
     args: dict[str, Any] = Field(
         default_factory=dict,
-        description="Arguments for the tool, e.g. {'name': 'Bedroom AC'}.",
+        description="Arguments for the tool, e.g. {'message': 'Time to leave'}.",
     )
 
 
@@ -219,17 +217,11 @@ class HomeAssistantAgent(Agent):
 
         Schedule without asking first; if the user corrects it, cancel the wrong task.
 
-        A task carries `steps` (concrete tool calls replayed exactly, in order) and/or
-        an `instruction` (natural language run at fire time). Provide at least one:
-
-        - Use `steps` for concrete, deterministic device actions you can pin down now.
-          Pass MULTIPLE steps when the request needs several actions — e.g. "turn on
-          the fan and set it to 50%" is two steps. Steps run in order and stop at the
-          first failure.
-        - Use `instruction` when the task needs judgement at run time or a natural
-          language answer (e.g. "tell me tomorrow's weather"). It runs after any steps,
-          sees their results, and may call more tools.
-        - Combine both to guarantee an action AND report on it.
+        A reminder is `steps` holding one send_notification call, replayed exactly.
+        Anything else, device actions included, is an `instruction`: at fire time it is
+        sent as a message in the user's conversation and you carry it out then. Write
+        it as the action to do at that moment, without the time, e.g. "Turn off the
+        bedroom AC" for "turn off the bedroom AC in an hour".
 
         Args:
             description: Short summary, e.g. "Turn off the master bedroom AC".
@@ -237,9 +229,8 @@ class HomeAssistantAgent(Agent):
             run_at: For "once": absolute local time in ISO 8601, e.g.
                 "2026-07-22T17:30". Resolve relative times yourself.
             cron: For "recurring": a 5-field cron expression, e.g. "0 8 * * 1-5".
-            steps: Ordered tool calls to replay at run time; each is a tool name + its
-                args, exactly as you would call it for an immediate action.
-            instruction: A natural-language instruction to run at fire time.
+            steps: For a reminder, the send_notification call to replay.
+            instruction: What to do when the task fires, in the user's language.
         """
         logger.info("schedule_task: %s [%s]", description, schedule_type)
         if schedule_type == "once":
@@ -262,13 +253,12 @@ class HomeAssistantAgent(Agent):
             raise ToolError(f"unknown schedule_type {schedule_type!r}.")
 
         steps = steps or []
-        ctx = await self.tool_context()  # validate each step's tool exists
-        for i, step in enumerate(steps, start=1):
-            if step.tool not in ctx.function_tools:
-                valid = ", ".join(sorted(ctx.function_tools))
-                raise ToolError(
-                    f"unknown tool {step.tool!r} in step {i}. Available: {valid}"
-                )
+        # a frozen device call goes stale when a device is renamed, so only a
+        # reminder is replayed as is
+        if any(step.tool != "send_notification" for step in steps):
+            raise ToolError(
+                "steps only hold send_notification; put other actions in instruction."
+            )
         instruction_text = instruction.strip() if instruction else None
         if not steps and not instruction_text:
             raise ToolError("provide steps (tool calls) and/or an instruction.")
