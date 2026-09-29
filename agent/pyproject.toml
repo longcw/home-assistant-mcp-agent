@@ -27,5 +27,5 @@ package = false
 # livekit-protocol's agent-db module from python-sdks main (livekit/python-sdks#831).
 # Both are pinned to commits; docs/text-endpoint.md says how to move them.
 [tool.uv.sources]
-livekit-agents = { git = "https://github.com/livekit/agents.git", rev = "c89c3055dee0a894010c2cab693e7d3f8acb5664", subdirectory = "livekit-agents" }
+livekit-agents = { git = "https://github.com/livekit/agents.git", rev = "5359777b6a01cdd6caa7b1108cd20d48f51edff3", subdirectory = "livekit-agents" }
 livekit-protocol = { git = "https://github.com/livekit/python-sdks.git", rev = "082e83c44dea983cca8aec21c948f84aa040d97c", subdirectory = "livekit-protocol" }

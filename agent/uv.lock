@@ -807,7 +807,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
-    { name = "livekit-agents", extras = ["mcp", "a2a"], git = "https://github.com/livekit/agents.git?subdirectory=livekit-agents&rev=c89c3055dee0a894010c2cab693e7d3f8acb5664" },
+    { name = "livekit-agents", extras = ["mcp", "a2a"], git = "https://github.com/livekit/agents.git?subdirectory=livekit-agents&rev=5359777b6a01cdd6caa7b1108cd20d48f51edff3" },
     { name = "livekit-protocol", git = "https://github.com/livekit/python-sdks.git?subdirectory=livekit-protocol&rev=082e83c44dea983cca8aec21c948f84aa040d97c" },
     { name = "pandas", specifier = ">=2.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
@@ -1033,7 +1033,7 @@ wheels = [
 [[package]]
 name = "livekit-agents"
 version = "1.8.3"
-source = { git = "https://github.com/livekit/agents.git?subdirectory=livekit-agents&rev=c89c3055dee0a894010c2cab693e7d3f8acb5664#c89c3055dee0a894010c2cab693e7d3f8acb5664" }
+source = { git = "https://github.com/livekit/agents.git?subdirectory=livekit-agents&rev=5359777b6a01cdd6caa7b1108cd20d48f51edff3#5359777b6a01cdd6caa7b1108cd20d48f51edff3" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
