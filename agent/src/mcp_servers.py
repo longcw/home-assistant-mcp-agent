@@ -18,7 +18,13 @@ from urllib.parse import quote
 
 import yaml
 from livekit.agents import RunContext, mcp
-from livekit.agents.llm import RawFunctionTool, ToolFlag, Toolset, function_tool
+from livekit.agents.llm import (
+    RawFunctionTool,
+    ToolError,
+    ToolFlag,
+    Toolset,
+    function_tool,
+)
 
 import ha
 import scheduler_client as scheduler
@@ -93,7 +99,7 @@ class Guarded(mcp.MCPToolset):
 
     With ``user``, it connects only for a person whose Settings-tab entry lists it. A
     tool in ``confirm`` runs only when called again after the person has spoken since
-    its first call, which answers with a request to ask them.
+    its first call, which fails with a request to ask them.
     """
 
     def __init__(self, *, user: str | None, confirm: list[str], **kwargs: Any) -> None:
@@ -139,7 +145,8 @@ class Guarded(mcp.MCPToolset):
                     tool(ctx, raw_arguments) if takes_ctx else tool(raw_arguments)
                 )
             self._asked[name] = said
-            return (
+            # an error, so the call reads as not done rather than as a success
+            raise ToolError(
                 f"Not done yet: {name} needs the person's yes first. Say what it will "
                 "do and ask them. If they agree in their next message, call it again."
             )
