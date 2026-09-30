@@ -11,6 +11,7 @@ from typing import Any
 import aiohttp
 import httpx
 from livekit.agents import mcp
+from livekit.agents.llm import ToolError
 from mcp.types import TextContent
 
 from config import MCP_PATH, settings
@@ -27,12 +28,20 @@ def text_result_resolver(ctx: mcp.MCPToolResultContext) -> str:
     """Return MCP results as plain text (HA sends a single text block).
 
     Keeps results readable for the LLM and lets our function tools parse the payload
-    directly instead of unwrapping the default JSON envelope.
+    directly instead of unwrapping the default JSON envelope. HA reports some failures
+    as a normal result, `{"success": false, "error": ...}`; those raise a ToolError.
     """
     parts = [c.text for c in ctx.result.content if isinstance(c, TextContent)]
-    if parts:
-        return "\n".join(parts)
-    return json.dumps([item.model_dump() for item in ctx.result.content])
+    if not parts:
+        return json.dumps([item.model_dump() for item in ctx.result.content])
+    text = "\n".join(parts)
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return text
+    if isinstance(data, dict) and data.get("success") is False:
+        raise ToolError(str(data.get("error") or text))
+    return text
 
 
 async def _post_service(path: str, payload: dict[str, Any]) -> bool:

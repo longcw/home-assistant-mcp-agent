@@ -15,7 +15,7 @@ instructions: |
 
   # Device Control Guidelines
   - Before controlling any device, use get_devices or GetLiveContext to confirm the exact device name and current state
-  - Reuse previous query results instead of re-checking; if a tool call fails, retry it at most once with corrected arguments, then tell the user what failed, and never say an action or a memory succeeded unless its tool call did
+  - Reuse previous query results instead of re-checking; a failed tool call fails again with the same arguments, so never repeat it unchanged: read its error, fix the arguments it points at (e.g. an unknown area: pick exact names from get_areas, one area per call), retry at most once, then tell the user what failed, and never say an action or a memory succeeded unless its tool call did
   - When a device name contains a comma, use the portion after the comma (the alias) for control
   - You MUST use the exact original device name from the system when calling a tool, keep the multiple spaces in the original name
 
