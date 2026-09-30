@@ -19,8 +19,9 @@ from urllib.parse import quote
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
-from livekit.agents import AgentServer, AgentSession
+from livekit.agents import AgentServer, AgentSession, SessionUsageUpdatedEvent
 from livekit.agents.a2a import A2AClient, A2ASessionContext, TaskInput, TaskStream
+from livekit.agents.metrics import LLMModelUsage
 from livekit.agents.store import LocalStore, StoreError
 
 import ha
@@ -44,8 +45,15 @@ _live: dict[str, AgentSession] = {}
 _suggested: dict[str, list[str]] = {}
 # the person each conversation belongs to, for the A2A endpoint's agent
 _owners: dict[str, str | None] = {}
-# each conversation's owner, title and last turn, so a person can list and reopen theirs
+# each conversation's owner, title, last turn and LLM token totals, so a person can list
+# and reopen theirs
 _index_file = _data_dir / "conversations.json"
+# a conversation's token totals, by their key in the index and LLMModelUsage's field
+_USAGE_FIELDS = {
+    "input": "input_tokens",
+    "output": "output_tokens",
+    "cached": "input_cached_tokens",
+}
 
 
 def _index() -> dict[str, dict[str, object]]:
@@ -556,6 +564,8 @@ class _Conversation:
             "task_id": turn.stream.task_id or None if live and turn else None,
             "items": shown[-limit:],
             "suggestions": suggestions,
+            # the LLM tokens it has used, cached input counted within input
+            "usage": _index().get(conversation_id or "", {}).get("usage"),
         }
 
 
@@ -871,3 +881,18 @@ def mount(server: AgentServer) -> None:
         ctx.attach(session)
         _live[ctx.context_id] = session
         session.on("close", lambda _: _live.pop(ctx.context_id, None))
+
+        # a loaded session counts from zero, so add it to what earlier loads used
+        earlier = dict(_index().get(ctx.context_id, {}).get("usage") or {})
+
+        def on_usage(ev: SessionUsageUpdatedEvent) -> None:
+            llms = [u for u in ev.usage.model_usage if isinstance(u, LLMModelUsage)]
+            usage = {
+                key: int(earlier.get(key, 0)) + sum(getattr(u, field) for u in llms)
+                for key, field in _USAGE_FIELDS.items()
+            }
+            index = _index()
+            index.setdefault(ctx.context_id, {"created": time.time()})["usage"] = usage
+            _index_file.write_text(json.dumps(index, ensure_ascii=False, indent=1))
+
+        session.on("session_usage_updated", on_usage)
