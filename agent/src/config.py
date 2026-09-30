@@ -23,6 +23,8 @@ class Settings:
     stt_model: str
     stt_language: str
     llm_model: str
+    # LLM calls one turn may chain through tools before it must answer.
+    max_tool_steps: int
     tts_model: str
     tts_voice: str
     tts_language: str
@@ -75,6 +77,7 @@ def load_settings() -> Settings:
         stt_model=os.getenv("STT_MODEL", "assemblyai/universal-3-5-pro"),
         stt_language=os.getenv("STT_LANGUAGE", "multi"),
         llm_model=os.getenv("LLM_MODEL", "google/gemma-4-31b-it"),
+        max_tool_steps=int(os.getenv("MAX_TOOL_STEPS", "6")),
         tts_model=os.getenv("TTS_MODEL", "fishaudio/s2.1-pro"),
         tts_voice=os.getenv("TTS_VOICE", "5c353fdb312f4888836a9a5680099ef0"),
         tts_language=os.getenv("TTS_LANGUAGE", ""),

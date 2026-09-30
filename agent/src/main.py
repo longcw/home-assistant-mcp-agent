@@ -45,7 +45,9 @@ async def _run_instruction(
     ctx: JobContext, agent: HomeAssistantAgent, text: str
 ) -> str:
     """Run an instruction as a headless text-only turn, for when text chat is off."""
-    session = AgentSession(llm=inference.LLM(settings.llm_model), max_tool_steps=8)
+    session = AgentSession(
+        llm=inference.LLM(settings.llm_model), max_tool_steps=settings.max_tool_steps
+    )
     await session.start(
         agent=agent,
         room=ctx.room,
@@ -264,7 +266,7 @@ async def entrypoint(ctx: JobContext) -> None:
             settings.tts_model, voice=settings.tts_voice, language=settings.tts_language
         ),
         turn_handling=TurnHandlingOptions(turn_detection="manual"),
-        max_tool_steps=8,
+        max_tool_steps=settings.max_tool_steps,
     )
 
     await session.start(agent=agent, room=ctx.room)

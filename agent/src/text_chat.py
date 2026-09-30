@@ -854,7 +854,10 @@ def mount(server: AgentServer) -> None:
         idle_timeout=settings.text_idle_timeout,
     )
     async def serve(ctx: A2ASessionContext) -> None:
-        session = AgentSession(llm=inference.LLM(settings.llm_model), max_tool_steps=8)
+        session = AgentSession(
+            llm=inference.LLM(settings.llm_model),
+            max_tool_steps=settings.max_tool_steps,
+        )
         agent = HomeAssistantAgent(user=_owners.get(ctx.context_id))
         suggested = _suggested.setdefault(ctx.context_id, [])
         agent._suggest_replies_cb = suggested.extend
