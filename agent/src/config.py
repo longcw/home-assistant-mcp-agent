@@ -6,8 +6,10 @@ the dataclass are fixed contract values shared with the scheduler and the fronte
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -23,6 +25,11 @@ class Settings:
     stt_model: str
     stt_language: str
     llm_model: str
+    # OpenAI-compatible endpoint serving llm_model instead of Inference; empty = off.
+    llm_base_url: str
+    llm_api_key: str
+    # extra fields merged into each request to that endpoint, from JSON
+    llm_extra_body: dict[str, Any]
     # LLM calls one turn may chain through tools before it must answer.
     max_tool_steps: int
     tts_model: str
@@ -77,6 +84,9 @@ def load_settings() -> Settings:
         stt_model=os.getenv("STT_MODEL", "assemblyai/universal-3-5-pro"),
         stt_language=os.getenv("STT_LANGUAGE", "multi"),
         llm_model=os.getenv("LLM_MODEL", "google/gemma-4-31b-it"),
+        llm_base_url=os.getenv("LLM_BASE_URL", ""),
+        llm_api_key=os.getenv("LLM_API_KEY", ""),
+        llm_extra_body=json.loads(os.getenv("LLM_EXTRA_BODY") or "{}"),
         max_tool_steps=int(os.getenv("MAX_TOOL_STEPS", "6")),
         tts_model=os.getenv("TTS_MODEL", "fishaudio/s2.1-pro"),
         tts_voice=os.getenv("TTS_VOICE", "5c353fdb312f4888836a9a5680099ef0"),

@@ -1,4 +1,4 @@
-"""Small shared helpers: time formatting and job-metadata parsing."""
+"""Small shared helpers: LLM construction, time formatting and job-metadata parsing."""
 
 from __future__ import annotations
 
@@ -6,6 +6,23 @@ import json
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
+
+from livekit.agents import inference, llm
+from livekit.plugins import openai
+
+from config import settings
+
+
+def build_llm() -> llm.LLM:
+    """The session LLM: LiveKit Inference, or the OpenAI-compatible endpoint if set."""
+    if not settings.llm_base_url:
+        return inference.LLM(settings.llm_model)
+    return openai.LLM(
+        model=settings.llm_model,
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        extra_body=settings.llm_extra_body,
+    )
 
 
 def to_aware_iso(run_at: str, tz: str) -> str:

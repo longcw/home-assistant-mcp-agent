@@ -19,7 +19,7 @@ from urllib.parse import quote
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
-from livekit.agents import AgentServer, AgentSession, inference
+from livekit.agents import AgentServer, AgentSession
 from livekit.agents.a2a import A2AClient, A2ASessionContext, TaskInput, TaskStream
 from livekit.agents.store import LocalStore, StoreError
 
@@ -27,6 +27,7 @@ import ha
 import scheduler_client as scheduler
 from agent import HomeAssistantAgent
 from config import UPDATE_PREFIX, settings
+from utils import build_llm
 
 logger = logging.getLogger("ha-mcp-agent.text")
 
@@ -855,7 +856,7 @@ def mount(server: AgentServer) -> None:
     )
     async def serve(ctx: A2ASessionContext) -> None:
         session = AgentSession(
-            llm=inference.LLM(settings.llm_model),
+            llm=build_llm(),
             max_tool_steps=settings.max_tool_steps,
         )
         agent = HomeAssistantAgent(user=_owners.get(ctx.context_id))

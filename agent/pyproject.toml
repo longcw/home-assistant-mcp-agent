@@ -5,7 +5,7 @@ description = "LiveKit voice agent that controls Home Assistant via its native M
 readme = "../README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "livekit-agents[mcp,a2a]>=1.6",
+    "livekit-agents[mcp,a2a,openai]>=1.6",
     "livekit-protocol>=1.1.27",
     "python-dotenv>=1.0",
     "pandas>=2.0",
