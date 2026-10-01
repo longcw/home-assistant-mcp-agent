@@ -93,9 +93,9 @@ A crash loses at most the item being written. The next request after a drop or a
 | `git` in the image, for those pins | `agent/Dockerfile` |
 | `AgentServer(store=...)` | `agent/src/main.py`, one line |
 | `livekit.agents.store.LocalStore`, `create_database()`, `session(...).load()`/`.release()` and `SessionRecord.history` (the history view of an unloaded conversation), `StoreError`, the private `SessionStore._databases` and the `<id>.sqlite` file naming (deleting a conversation) | `agent/src/conversations.py` |
-| `@server.a2a_session(endpoint=, description=, idle_timeout=)`, `A2ASessionContext.persisted`, `ctx.attach()` | `agent/src/text_chat/__init__.py` |
-| `AgentSession.start(persist=)`, `AgentSession.save()` | `agent/src/text_chat/__init__.py`, `agent/src/conversations.py` |
-| `livekit.agents.a2a.A2AClient(url, context_id=, headers=)`, `.send()`, `.aclose()`, `TaskInput(text=, conversation_id=)`, `TaskUpdate.state`/`.text`/`.item` (a `FunctionCall` with `update_of` for a progress report) | `agent/src/text_chat/chat.py`, `agent/src/text_chat/turn.py` |
+| `@server.a2a_session(endpoint=, description=, idle_timeout=)`, `A2ASessionContext.persisted`, `ctx.attach()` | `agent/src/text_chat/routes.py` |
+| `AgentSession.start(persist=)`, `AgentSession.save()` | `agent/src/text_chat/routes.py`, `agent/src/conversations.py` |
+| `livekit.agents.a2a.A2AClient(url, context_id=, headers=)`, `.send()`, `.aclose()`, `TaskInput(text=, conversation_id=)`, `TaskUpdate.state`/`.text`/`.item` (a `FunctionCall` with `update_of` for a progress report) | `agent/src/text_chat/chat.py` |
 
 Nothing else in the repo imports from `livekit.agents.store` or `livekit.agents.a2a`.
 

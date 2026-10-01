@@ -1,4 +1,4 @@
-"""The MCP servers beyond Home Assistant's, as the mcp.yaml config file lists them.
+"""MCP clients for the servers beyond Home Assistant's, as the mcp.yaml file lists them.
 
 Values take ``${VAR}`` or ``${VAR:-default}`` from the environment, so the file carries
 no secrets. An entry whose ``requires`` variables are unset is skipped, and a header
@@ -27,8 +27,8 @@ from livekit.agents.llm import (
 )
 
 import ha
-import scheduler_client as scheduler
 from config import settings
+from scheduler_client import scheduler
 
 logger = logging.getLogger("ha-mcp-agent.mcp")
 

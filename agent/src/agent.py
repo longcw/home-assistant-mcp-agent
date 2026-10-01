@@ -20,9 +20,9 @@ from livekit.agents.llm import (
 )
 
 import ha
-import mcp_servers
-import scheduler_client as scheduler
+import mcp_clients
 from config import LIVE_CONTEXT_TOOL, UPDATE_PREFIX, settings
+from scheduler_client import scheduler
 from utils import current_time_text, to_aware_iso
 
 logger = logging.getLogger("ha-mcp-agent")
@@ -63,7 +63,7 @@ class HomeAssistantAgent(Agent):
                     tool_result_resolver=ha.text_result_resolver,
                 ),
             ),
-            *mcp_servers.toolsets(user_id),
+            *mcp_clients.toolsets(user_id),
         ]
         super().__init__(instructions=load_instructions(), tools=tools)
         # the id of the person this session speaks for, or None for no one

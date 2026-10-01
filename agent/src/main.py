@@ -13,7 +13,7 @@ from livekit.agents import (
     inference,
 )
 
-import text_chat
+import text_chat.routes
 from agent import HomeAssistantAgent
 from config import (
     MAX_TOOL_OUTPUT_CHARS,
@@ -30,7 +30,7 @@ logger = logging.getLogger("ha-mcp-agent")
 
 # the store holds the conversations; voice sessions do not join one yet
 server = AgentServer(port=settings.http_port, store=conversations.store)
-text_chat.mount(server)
+text_chat.routes.mount(server)
 
 
 def _forward_tool_events(ctx: JobContext, session: AgentSession) -> None:
