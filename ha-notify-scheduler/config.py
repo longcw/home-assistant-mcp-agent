@@ -1,7 +1,8 @@
 """Runtime configuration for the scheduler service, read from the environment.
 
 The service shares the repo-root ``.env`` with the agent worker (see docker-compose.yml),
-so the Home Assistant credentials and ``TEXT_API_TOKEN`` are the values the worker uses.
+so the Home Assistant credentials, ``TEXT_API_TOKEN`` and the ``TEXT_LIVE_*`` phone
+settings are the values the worker uses.
 """
 
 from __future__ import annotations
@@ -20,6 +21,14 @@ class Config:
     chat_token: str
     # Seconds a fired instruction may take, waiting out the person's running turn included.
     run_timeout: float
+    # The phone showing text-turn progress for no one in particular; empty = none.
+    default_phone: str
+    # How a turn's progress shows: "notification" or "activity" (a Live Activity).
+    live_mode: str
+    # Page the phone opens when the progress is tapped, e.g. the card's Text tab.
+    live_url: str
+    # Seconds after the last turn before a Live Activity is cleared.
+    live_clear_after: float
     # SQLite file; the source of truth for tasks + run history. Mounted on a volume so it
     # survives container restarts (see docker-compose.yml).
     db_path: str
@@ -41,6 +50,10 @@ def load_config() -> Config:
         chat_url=os.environ.get("AGENT_CHAT_URL", "http://agent:8081/chat"),
         chat_token=os.environ.get("TEXT_API_TOKEN", ""),
         run_timeout=float(os.environ.get("SCHEDULED_RUN_TIMEOUT", "200")),
+        default_phone=os.environ.get("TEXT_LIVE_ACTIVITY", ""),
+        live_mode=os.environ.get("TEXT_LIVE_MODE", "notification"),
+        live_url=os.environ.get("TEXT_LIVE_URL", ""),
+        live_clear_after=float(os.environ.get("TEXT_LIVE_CLEAR_AFTER", "900")),
         db_path=os.environ.get("SCHEDULER_DB", "/data/scheduler.db"),
         default_tz=os.environ.get("AGENT_TZ") or os.environ.get("TZ") or "UTC",
         misfire_grace_seconds=int(os.environ.get("MISFIRE_GRACE_SECONDS", "3600")),

@@ -1,7 +1,8 @@
 """FastAPI surface for the scheduler service.
 
-The worker's scheduling tools call the ``/tasks`` CRUD endpoints over the compose network,
-and the Home Assistant integration reads tasks and settings through the published port.
+The worker calls the ``/tasks`` CRUD, ``/notify``, ``/progress`` and ``/users`` endpoints over
+the compose network, and the Home Assistant integration reads tasks and settings through the
+published port.
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from config import load_config
 from db import make_engine, make_session_factory
 from schemas import (
+    NotifyRequest,
+    ProgressEvent,
     SettingsOut,
     SettingsUpdate,
     TaskCreate,
@@ -108,6 +111,18 @@ def delete_task(task_id: str, who: Owner) -> TaskOut:
     if out is None:
         raise HTTPException(status_code=404, detail="task not found")
     return out
+
+
+@app.post("/notify", dependencies=guard)
+async def notify(req: NotifyRequest) -> dict:
+    """Send a notification to a person's channels."""
+    return {"sent": await service.notify(req)}
+
+
+@app.post("/progress", dependencies=guard)
+async def progress(event: ProgressEvent) -> dict:
+    """Show one phase of a person's text turn on their phone."""
+    return {"shown": await service.progress.update(event)}
 
 
 @app.get("/users/resolve", dependencies=guard)

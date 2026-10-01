@@ -9,6 +9,7 @@ and is rehydrated from the table on boot, so there is only one durable store to 
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -20,10 +21,13 @@ from apscheduler.triggers.date import DateTrigger
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
+import ha
 import runner
 from config import Config
+from progress import PhoneProgress
 from models import Run, Settings, Task
 from schemas import (
+    NotifyRequest,
     RunOut,
     SettingsOut,
     SettingsUpdate,
@@ -58,15 +62,21 @@ class SchedulerService:
         self._Session = session_factory
         default_tz = ZoneInfo(cfg.default_tz) if cfg.default_tz else timezone.utc
         self.scheduler = AsyncIOScheduler(timezone=default_tz)
+        self.progress = PhoneProgress(cfg, self.phone)
+        self._listener: asyncio.Task[None] | None = None
 
     # --- lifecycle -----------------------------------------------------------------
 
     def start(self) -> None:
         self.scheduler.start()
         self._rehydrate()
+        if self.cfg.ha_url and self.cfg.chat_token:
+            self._listener = asyncio.create_task(self.progress.listen())
 
     async def stop(self) -> None:
         self.scheduler.shutdown(wait=False)
+        if self._listener is not None:
+            self._listener.cancel()
 
     # --- public CRUD ---------------------------------------------------------------
 
@@ -87,6 +97,27 @@ class SchedulerService:
     def user(self, user_id: str | None) -> UserSettings | None:
         """The settings of the person with this id; None for no one or someone unlisted."""
         return next((p for p in self.get_settings().users if p.id == user_id), None)
+
+    def notify_targets(self, user_id: str | None) -> list[str]:
+        """A person's notification channels; HA's own for anyone else."""
+        person = self.user(user_id)
+        return person.notify_targets if person else ["persistent_notification"]
+
+    def phone(self, user_id: str | None) -> str:
+        """The notify service showing a person's text-turn progress; "" for none.
+
+        No one in particular gets TEXT_LIVE_ACTIVITY; a person gets the first phone in their
+        devices, so one person's chat never shows on another's phone.
+        """
+        if user_id is None:
+            return self.cfg.default_phone
+        person = self.user(user_id)
+        targets = person.notify_targets if person else []
+        return next((t for t in targets if t.startswith("mobile_app_")), "")
+
+    async def notify(self, req: NotifyRequest) -> bool:
+        targets = self.notify_targets(req.user)
+        return await ha.notify(self.cfg, req.message, req.title or "", targets)
 
     def create_task(self, req: TaskCreate, owner: str | None = None) -> TaskOut:
         run_at_iso, cron = self._validate_schedule(req.schedule)
@@ -219,11 +250,16 @@ class SchedulerService:
             user = task.user
             s.commit()
 
-        # a person's notification channels; HA's own for anyone else
-        person = self.user(user)
-        targets = person.notify_targets if person else ["persistent_notification"]
         logger.info("running task %s (run %s): %s", task_id, run_id, description)
-        status, result = await runner.run(self.cfg, description, execution, user, targets)
+        status, result = await runner.run(
+            self.cfg,
+            description,
+            execution,
+            user,
+            self.notify_targets(user),
+            # a phone that shows the person's turns already has the answer
+            shown=bool(self.phone(user)),
+        )
         with self._Session() as s:
             run = s.get(Run, run_id)
             if run is not None:  # the task was deleted while it ran

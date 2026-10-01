@@ -12,13 +12,14 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
-import runner
+import ha
 import service as service_module
 from config import Config
 from db import make_engine, make_session_factory
 from models import Task
 from schemas import (
     ExecutionSpec,
+    ProgressEvent,
     ScheduleSpec,
     SettingsUpdate,
     TaskCreate,
@@ -35,6 +36,10 @@ def make_service(tmp_path) -> SchedulerService:
         chat_url="http://agent/chat",
         chat_token="chat-token",
         run_timeout=5,
+        default_phone="",
+        live_mode="notification",
+        live_url="",
+        live_clear_after=900,
         db_path=str(tmp_path / "s.db"),
         default_tz="UTC",
         misfire_grace_seconds=3600,
@@ -175,7 +180,7 @@ def test_update_reschedule(tmp_path):
 
 
 def mock_http(monkeypatch, handler) -> list[httpx.Request]:
-    """Route the runner's HTTP calls to ``handler``; returns the requests it got."""
+    """Route the service's HTTP calls to ``handler``; returns the requests it got."""
     requests: list[httpx.Request] = []
     real = httpx.AsyncClient
 
@@ -186,7 +191,7 @@ def mock_http(monkeypatch, handler) -> list[httpx.Request]:
     def client(**kwargs) -> httpx.AsyncClient:
         return real(transport=httpx.MockTransport(record), **kwargs)
 
-    monkeypatch.setattr(runner.httpx, "AsyncClient", client)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
     return requests
 
 
@@ -221,17 +226,20 @@ async def test_fire_sends_a_reminder(tmp_path, monkeypatch):
 
 async def test_fire_sends_an_instruction_to_the_agent(tmp_path, monkeypatch):
     svc = make_service(tmp_path)
+    svc.update_settings(
+        SettingsUpdate(users=[UserSettings(name="Alice", notify_targets=["mobile_app_a"])])
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/chat":
-            return httpx.Response(200, text="AC is off.", headers={"X-Phone": "mobile_app_a"})
+            return httpx.Response(200, text="AC is off.")
         return httpx.Response(200, json=[])
 
     requests = mock_http(monkeypatch, handler)
     task_id = fire_once(svc, ExecutionSpec(instruction="turn off the AC"), "alice")
     await svc._fire(task_id)
 
-    # the phone showed the turn, so nothing else is sent
+    # alice's phone shows her turns, so nothing else is sent
     assert [r.url.path for r in requests] == ["/chat"]
     sent = requests[0]
     assert sent.headers["authorization"] == "Bearer chat-token"
@@ -262,6 +270,47 @@ async def test_fire_reports_a_failed_turn(tmp_path, monkeypatch):
     assert json.loads(requests[1].content)["title"] == "Scheduled task failed"
     run = svc.get_task(task_id).runs[0]
     assert (run.status, run.result) == ("error", "[failed] no such device")
+
+
+async def test_progress_on_the_phone_and_a_tapped_reply(tmp_path, monkeypatch):
+    svc = make_service(tmp_path)
+    svc.update_settings(
+        SettingsUpdate(users=[UserSettings(name="Alice", notify_targets=["mobile_app_a"])])
+    )
+    requests = mock_http(monkeypatch, lambda _: httpx.Response(200, json=[]))
+    for event in (
+        ProgressEvent(user="alice", phase="start", text="AC off?"),
+        ProgressEvent(user="alice", phase="step", tool="HassTurnOff", args={"name": "AC"}),
+        ProgressEvent(user="alice", phase="final", text="Off.", replies=["Thanks"]),
+    ):
+        assert await svc.progress.update(event)
+    sent = [json.loads(r.content) for r in requests]
+    assert [s["message"] for s in sent] == [
+        "clear_notification",
+        "…",
+        "→ HassTurnOff · AC",
+        "clear_notification",
+        "Off.",
+    ]
+    assert sent[2]["title"] == "AC off?"
+    assert sent[2]["data"]["push"]["interruption-level"] == "passive"
+    buttons = sent[4]["data"]["actions"]
+    assert [b["title"] for b in buttons] == ["Thanks", "Reply"]
+    # no one in particular has no phone here, so nothing shows
+    assert not await svc.progress.update(ProgressEvent(phase="start", text="hi"))
+
+    async def taps():
+        yield {"action": buttons[0]["action"]}
+        yield {"action": buttons[1]["action"], "reply_text": " later "}
+        yield {"action": "someone else's"}
+
+    monkeypatch.setattr(ha, "subscribe", lambda cfg, event_type: taps())
+    requests.clear()
+    await svc.progress.listen()
+    assert [json.loads(r.content) for r in requests] == [
+        {"text": "Thanks", "user": "alice"},
+        {"text": "later", "user": "alice"},
+    ]
 
 
 def test_rehydrate_marks_missed(tmp_path):

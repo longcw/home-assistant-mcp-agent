@@ -29,8 +29,8 @@ A task's `execution` holds exactly one of:
   The title defaults to the task's description.
 - `instruction` — the action to do at fire time, sent as a message in the owner's text
   conversation (`POST /chat` with `wait`), so the agent resolves devices then, sees a
-  failing tool and can retry. The reply is the run's result. When no phone showed the turn
-  (no `X-Phone` header), the reply or the failure is also sent as a notification.
+  failing tool and can retry. The reply is the run's result. When the owner has no phone
+  showing their turns, the reply or the failure is also sent as a notification.
 
 ## API
 
@@ -43,6 +43,8 @@ A task's `execution` holds exactly one of:
 | `DELETE` | `/tasks/{id}` | Cancel a task. |
 | `GET` / `PUT` | `/settings` | The people and the default notify channels (the card's Settings tab). |
 | `GET` | `/users/{id}` | One person's settings. |
+| `POST` | `/notify` | `{user, message, title}`: a notification to the person's channels (HA's own for no one). |
+| `POST` | `/progress` | `{user, phase, text, tool, args, ok, replies}`: one phase of a text turn, on the person's phone (see `progress.py`). A tap on the answer's buttons is sent to the agent's `/chat` as the person's next message. |
 | `GET` | `/users/resolve?ha_user_id=` | The id of the person linked to an HA login. |
 | `GET` | `/healthz` | Liveness. |
 
@@ -53,6 +55,8 @@ A task's `execution` holds exactly one of:
 | `HA_URL` / `HA_TOKEN` | Send reminders and run notifications through Home Assistant. |
 | `AGENT_CHAT_URL` | The agent's text chat endpoint (default `http://agent:8081/chat`). |
 | `TEXT_API_TOKEN` | Bearer token for that endpoint; unset, instructions fail. |
+| `TEXT_LIVE_ACTIVITY` | The phone showing text-turn progress for no one in particular; a person's is the first phone among their devices. |
+| `TEXT_LIVE_MODE` / `TEXT_LIVE_URL` / `TEXT_LIVE_CLEAR_AFTER` | How progress shows (`notification` or `activity`), the page a tap opens, and when a Live Activity clears. |
 | `SCHEDULED_RUN_TIMEOUT` | Seconds an instruction may take, waiting out a running turn included (default 200). |
 | `AGENT_TZ` (or `TZ`) | Default timezone for schedules. |
 | `SCHEDULER_DB` | SQLite path (default `/data/scheduler.db`). |

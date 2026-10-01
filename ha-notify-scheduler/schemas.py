@@ -7,7 +7,7 @@ The worker's scheduling tools speak this shape (see agent/agent.py), and the car
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -54,6 +54,29 @@ class ExecutionSpec(BaseModel):
         if (self.notification is not None) == has_instruction:
             raise ValueError("execution needs exactly one of notification or instruction")
         return self
+
+
+class NotifyRequest(BaseModel):
+    """A notification for a person, sent to their channels; no one gets HA's own."""
+
+    user: Optional[str] = None
+    message: str
+    title: Optional[str] = None
+
+
+class ProgressEvent(BaseModel):
+    """One phase of a person's text turn, for their phone (see progress.py)."""
+
+    user: Optional[str] = None
+    phase: Literal["start", "step", "report", "final"]
+    # the question, a progress report, or the answer
+    text: str = ""
+    # a step's tool call
+    tool: str = ""
+    args: Any = None
+    # the answer: whether the turn succeeded, and the quick replies it offered
+    ok: bool = True
+    replies: list[str] = Field(default_factory=list)
 
 
 class TaskCreate(BaseModel):
