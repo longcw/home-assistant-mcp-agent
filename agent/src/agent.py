@@ -21,7 +21,6 @@ from livekit.agents.llm import (
 
 import ha
 import mcp_servers
-import people
 import scheduler_client as scheduler
 from config import LIVE_CONTEXT_TOOL, UPDATE_PREFIX, settings
 from utils import current_time_text, to_aware_iso
@@ -54,7 +53,7 @@ class HomeAssistantAgent(Agent):
     tools defer actions to the scheduler service.
     """
 
-    def __init__(self, user: str | None = None) -> None:
+    def __init__(self, user_id: str | None = None) -> None:
         tools: list[Tool | Toolset] = [
             mcp.MCPToolset(
                 id="home-assistant",
@@ -64,11 +63,11 @@ class HomeAssistantAgent(Agent):
                     tool_result_resolver=ha.text_result_resolver,
                 ),
             ),
-            *mcp_servers.toolsets(user),
+            *mcp_servers.toolsets(user_id),
         ]
         super().__init__(instructions=load_instructions(), tools=tools)
-        # the person this session speaks for (casefolded), or None for no one
-        self.user = user
+        # the id of the person this session speaks for, or None for no one
+        self.user_id = user_id
         self._devices: pd.DataFrame | None = None
         self._devices_updated_at: float = 0
         self._devices_timeout_interval = 30
@@ -168,16 +167,14 @@ class HomeAssistantAgent(Agent):
     async def send_notification(self, message: str, title: str | None = None) -> str:
         """Send the user a notification (Home Assistant + their chosen devices).
 
-        Use to reach the user proactively, e.g. from a scheduled task. Write in the
-        user's language.
+        Use only when the user asks for one. Write in the user's language.
 
         Args:
             message: The notification body.
             title: Optional short title.
         """
         logger.info("send_notification: %s", message)
-        targets = await people.notify_targets(self.user)
-        ok = await ha.notify(message, title=title, targets=targets)
+        ok = await scheduler.notify(self.user_id, message, title)
         return "Notification sent." if ok else "Failed to send the notification."
 
     # --- Scheduling tools ---
@@ -249,7 +246,7 @@ class HomeAssistantAgent(Agent):
                     "schedule": schedule,
                     "execution": execution,
                 },
-                self.user,
+                self.user_id,
             )
         except Exception as exc:  # noqa: BLE001 - surface a message for the LLM to relay
             logger.exception("schedule_task failed")
@@ -262,7 +259,7 @@ class HomeAssistantAgent(Agent):
         """List the currently scheduled (active) tasks, soonest first."""
         logger.info("list_scheduled_tasks")
         try:
-            tasks = await scheduler.list_tasks(self.user, active_only=True)
+            tasks = await scheduler.list_tasks(self.user_id, active_only=True)
         except Exception as exc:  # noqa: BLE001
             logger.exception("list_scheduled_tasks failed")
             raise ToolError(f"could not list scheduled tasks: {exc}") from exc
@@ -274,7 +271,7 @@ class HomeAssistantAgent(Agent):
         list_scheduled_tasks)."""
         logger.info("cancel_scheduled_task: %s", task_id)
         try:
-            task = await scheduler.delete_task(task_id, self.user)
+            task = await scheduler.delete_task(task_id, self.user_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception("cancel_scheduled_task failed")
             raise ToolError(f"could not cancel task: {exc}") from exc
@@ -312,7 +309,7 @@ class HomeAssistantAgent(Agent):
                 }
             if not payload:
                 raise ToolError("nothing to update.")
-            task = await scheduler.update_task(task_id, payload, self.user)
+            task = await scheduler.update_task(task_id, payload, self.user_id)
             return json.dumps(task, ensure_ascii=False)
         except ToolError:
             raise

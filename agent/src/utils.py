@@ -56,3 +56,11 @@ def parse_job_metadata(raw: str | None) -> dict[str, Any]:
 def truncate(text: str, limit: int) -> str:
     """Clip text to `limit` chars, adding an ellipsis when clipped."""
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+def parse_arguments(raw: str | None) -> Any:
+    """A tool call's JSON arguments, or the raw text when they do not parse."""
+    try:
+        return json.loads(raw or "{}")
+    except ValueError:
+        return raw

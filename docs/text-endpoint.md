@@ -15,7 +15,7 @@ curl -X POST http://<agent-host>:8952/chat \
 
 - The body is either JSON `{"text": "...", "new": false, "wait": false, "steps": true, "user": "..."}` or plain text. `?new=1`, `?wait=1`, `?steps=0` and `?user=` work too.
 - By default it answers `202 accepted` as soon as the turn has started, and the turn runs on in the background: its progress and its answer go to the person's phone (below), and the card's Text tab shows it from the history. With `"wait": true` it answers with the agent's reply instead.
-- `user` names the family member speaking; the name is matched without regard to case. Each person has their own conversation and Mem0 memories, and gets notifications and phone progress on the devices ticked for them under People in the card's Settings tab (progress goes to the first ticked phone). A name not listed there still gets its own conversation and memories, with the default devices for notifications and no phone progress. Without `user` the request is no one in particular: the conversation, memories and `TEXT_LIVE_ACTIVITY` phone from before there were people. Through the HA integration (the card's Text tab) the HA login stands in for the name, once a person is linked to it.
+- `user` is the id of the family member speaking: their casefolded name, as a person is listed under People in the card's Settings tab. The agent knows a person only by that id. Each person has their own conversation and Mem0 memories, and ha-notify-scheduler maps the id to the devices ticked for them, for notifications and phone progress (progress goes to the first ticked phone). An id not listed there still gets its own conversation and memories, with the default devices for notifications and no phone progress. Without `user` the request is no one in particular: the conversation, memories and `TEXT_LIVE_ACTIVITY` phone from before there were people. Through the HA integration (the card's Text tab) the integration sends the id of the person linked to the HA login.
 - With `wait`, the reply is plain text: one line per tool call the turn made (`→ HassTurnOn({"name": "客厅 灯"})`, plus `  … ` lines for a tool's progress reports), a blank line, then the agent's answer. `"steps": false` returns the answer alone, which suits *Speak Text*. A turn that started a new conversation begins with `(new conversation)`. The `X-Conversation-Id` header names the conversation, and `X-Phone`, when present, the phone that showed the turn and its answer.
 - A new message interrupts a turn still running: that turn's reply stops, and nothing more of it reaches the phone, but a tool it already moved to the background keeps running and its result still arrives. `POST /chat/cancel` `{"user"}` interrupts the running turn the same way and answers at once, so a client calls it the moment the person starts speaking. `"force": true` stops the tools it started as well: every background MCP tool is cancellable, and the MCP server is told the call was cancelled (livekit/agents#7542, applied from `agent/patches/` until the pin includes it). `{"task_id"}` from the history stops only that turn, never a newer one.
 - A person's requests go into one conversation, so the agent remembers earlier turns, across restarts too, until a new one is asked for: `"new": true`, or the new-conversation button on the card's Text tab (with no `text` it only starts the new one). Setting `TEXT_RENEW_AFTER` to a number of seconds also starts one on its own after that long without a request; it is off by default.
@@ -37,10 +37,10 @@ The chat routes are registered before `@server.a2a_session`: the A2A binding mou
 
 ### Progress on the phone
 
-With `TEXT_LIVE_ACTIVITY` set to a phone's notify service (`mobile_app_my_iphone`), each turn's progress also goes to that phone, with no unlock needed to read it. Every push carries the tag `ha-text`, so each replaces the last instead of piling up. Steps show as `✓` done and `…` running, with arguments as plain values (`HassTurnOff · 背景灯 电视 左键`), then the answer. Tapping opens `TEXT_LIVE_URL`, the card's Text tab. `TEXT_LIVE_MODE` picks how:
+The agent posts each turn's phases to ha-notify-scheduler's `POST /progress` with the person's id, and the service shows them on that person's phone (`ha-notify-scheduler/progress.py`), with no unlock needed to read it. For no one in particular the phone is `TEXT_LIVE_ACTIVITY`, a phone's notify service (`mobile_app_my_iphone`); the `TEXT_LIVE_*` settings are the service's. Every push carries the tag `ha-text`, so each replaces the last instead of piling up. Steps show as `✓` done and `…` running, with arguments as plain values (`HassTurnOff · 背景灯 电视 左键`), then the answer. Tapping opens `TEXT_LIVE_URL`, the card's Text tab. `TEXT_LIVE_MODE` picks how:
 
 - `notification` (default): an ordinary notification titled with the question. The question and the answer pop with sound; each tool call is appended to the question's notification as a `passive` update without sound, so it never pops, and once that notification is gone it arrives quietly on its own. iOS alerts only once per tag, so the answer first sends `clear_notification` for the tag and then posts anew. Plain remote pushes, so it works with the app closed, but they can lag by a few seconds.
-- `activity`: the agent only reports each turn's phases, `start` (the question), `progress` (each tool call) and `final` (the answer), to the HA integration's `POST /api/livekit_voice/progress` (in `ha-livekit-agent-frontend`, `progress.py`), with the HA token. That view runs inside Home Assistant, so it can read from mobile_app whether the phone's Live Activity for the tag is running — which the phone reports when an activity starts and withdraws when it is swiped away — and does the rest:
+- `activity`: the service only reports each turn's phases, `start` (the question), `progress` (each tool call) and `final` (the answer), to the HA integration's `POST /api/livekit_voice/progress` (in `ha-livekit-agent-frontend`, `progress.py`), with the HA token. That view runs inside Home Assistant, so it can read from mobile_app whether the phone's Live Activity for the tag is running — which the phone reports when an activity starts and withdraws when it is swiped away — and does the rest:
   - `start` starts the activity, or updates the running one, and always alerts.
   - `progress` updates a running activity quietly; while a start is still waiting for the phone's token, it holds the latest update and sends it once the token appears (up to 20 seconds), since mobile_app sends an update for a tag it has no token for as another push-to-start; with no activity at all it is skipped.
   - `final` shows the answer on the activity, and sends it as a regular notification (tag `ha-text-answer`, cleared first so it pops, carrying the reply buttons). On a running activity the answer alerts there and the notification is quiet; otherwise, or when HA cannot tell, the notification sounds. The activity clears `TEXT_LIVE_CLEAR_AFTER` (900) seconds after the last turn.
@@ -51,7 +51,7 @@ With `TEXT_LIVE_ACTIVITY` set to a phone's notify service (`mobile_app_my_iphone
 
 ### Reply buttons
 
-The answer notification carries buttons: each quick reply the agent offered with `suggest_replies` in that turn (such as 确认 / 取消 when it asks to confirm), plus a **Reply** button that takes free text. Tapping one sends that text into the same conversation as the next turn, from the lock screen, without opening the Shortcut. iOS shows the buttons on a long press or when the notification is expanded; each one asks for Face ID first, since a tap can control the house. They are HA [actionable notifications](https://companion.home-assistant.io/docs/notifications/actionable-notifications/) (`activationMode` background): the tap fires `mobile_app_notification_action` in HA, which the agent subscribes to over HA's WebSocket API (`ha.subscribe`). Only the latest answer's buttons are live, and they do not survive an agent restart.
+The answer notification carries buttons: each quick reply the agent offered with `suggest_replies` in that turn (such as 确认 / 取消 when it asks to confirm), plus a **Reply** button that takes free text. Tapping one sends that text into the same conversation as the next turn, from the lock screen, without opening the Shortcut. iOS shows the buttons on a long press or when the notification is expanded; each one asks for Face ID first, since a tap can control the house. They are HA [actionable notifications](https://companion.home-assistant.io/docs/notifications/actionable-notifications/) (`activationMode` background): the tap fires `mobile_app_notification_action` in HA, which ha-notify-scheduler subscribes to over HA's WebSocket API and sends to `/chat` as that person. Only each person's latest answer's buttons are live, and they do not survive a restart of the service.
 
 ### iPhone Shortcut
 
@@ -72,18 +72,18 @@ POST /chat  ──►  bridge (A2AClient)  ──►  /home-assistant  (A2A endp
 
 - `/home-assistant` is `@server.a2a_session(...)` on the agent server's own HTTP app (port 8081 in the container, published as 8952). It runs in the worker's main process, not in a job process, and has no room: text in, text out, LLM only.
 - `/chat` is a FastAPI route on the same app. It turns one line into a `TaskInput`, sends it to `/home-assistant` over loopback with the framework's `A2AClient`, and turns the `TaskUpdate` stream back into one line. So the JSON wire format is the framework's business, not this repo's.
-- One conversation is one SQLite file, `agent-data/sessions/<conversation id>.sqlite`, created with `LocalStore.create_database()`. The id of the current one is in `agent-data/current_conversation`, whose modification time is the last turn's, which the renewal reads.
+- One conversation is one SQLite file, `agent-data/sessions/<conversation id>.sqlite`, created with `LocalStore.create_database()`. `agent-data/conversations.json` indexes them: each one's owner, title, last turn and token totals, and each person's current one; the renewal reads the last turn's time. A conversation belongs to no mode (`agent/src/conversations.py`): a session joins one through `conversations.attach()`, which only the text endpoint calls so far.
 - The agent is the only one in the conversation, so its session is the conversation's *front session*: the bridge uses the conversation id as the A2A context id, as the branch's `examples/voice_agents/delegation/chat.py` does.
 
 ### When a conversation is saved
 
-The framework saves a session **once, when it closes**. Here that is:
+The agent saves a loaded session as each chat item arrives (`AgentSession.save()`, which writes only what changed since the last save), and the framework saves it once more when it closes:
 
 - after `TEXT_IDLE_TIMEOUT` seconds (1800) with no request, when the endpoint drops the context;
 - when a new conversation replaces it (`"new": true`, or `TEXT_RENEW_AFTER` when set; the bridge sends the A2A goodbye first);
 - on a graceful shutdown (`docker compose stop`/`restart`; `stop_grace_period: 30s` in the compose file).
 
-A crash loses the turns since the last save. The next request after a drop or a restart rehydrates the session from SQLite (`rehydrated a persisted session` in the log).
+A crash loses at most the item being written. The next request after a drop or a restart rehydrates the session from SQLite (`rehydrated a persisted session` in the log).
 
 ## Where the draft API is used
 
@@ -92,10 +92,10 @@ A crash loses the turns since the last save. The next request after a drop or a 
 | `livekit-agents` and `livekit-protocol` pinned to commits (`[tool.uv.sources]`) | `agent/pyproject.toml`, `agent/uv.lock` |
 | `git` in the image, for those pins | `agent/Dockerfile` |
 | `AgentServer(store=...)` | `agent/src/main.py`, one line |
-| `livekit.agents.store.LocalStore`, `create_database()`, `session(...).load()`/`.release()` and `SessionRecord.history` (the history view of an unloaded conversation), `StoreError`, the private `SessionStore._databases` and the `<id>.sqlite` file naming (deleting a conversation) | `agent/src/text_chat.py` |
-| `@server.a2a_session(endpoint=, description=, idle_timeout=)`, `A2ASessionContext.persisted`, `ctx.attach()` | `agent/src/text_chat.py` |
-| `AgentSession.start(persist=)` | `agent/src/text_chat.py` |
-| `livekit.agents.a2a.A2AClient(url, context_id=, headers=)`, `.send()`, `.aclose()`, `TaskInput(text=, conversation_id=)`, `TaskUpdate.state`/`.text`/`.item` (a `FunctionCall` with `update_of` for a progress report) | `agent/src/text_chat.py` |
+| `livekit.agents.store.LocalStore`, `create_database()`, `session(...).load()`/`.release()` and `SessionRecord.history` (the history view of an unloaded conversation), `StoreError`, the private `SessionStore._databases` and the `<id>.sqlite` file naming (deleting a conversation) | `agent/src/conversations.py` |
+| `@server.a2a_session(endpoint=, description=, idle_timeout=)`, `A2ASessionContext.persisted`, `ctx.attach()` | `agent/src/text_chat/__init__.py` |
+| `AgentSession.start(persist=)`, `AgentSession.save()` | `agent/src/text_chat/__init__.py`, `agent/src/conversations.py` |
+| `livekit.agents.a2a.A2AClient(url, context_id=, headers=)`, `.send()`, `.aclose()`, `TaskInput(text=, conversation_id=)`, `TaskUpdate.state`/`.text`/`.item` (a `FunctionCall` with `update_of` for a progress report) | `agent/src/text_chat/chat.py`, `agent/src/text_chat/turn.py` |
 
 Nothing else in the repo imports from `livekit.agents.store` or `livekit.agents.a2a`.
 

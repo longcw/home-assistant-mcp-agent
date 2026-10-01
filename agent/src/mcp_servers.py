@@ -27,7 +27,7 @@ from livekit.agents.llm import (
 )
 
 import ha
-import people
+import scheduler_client as scheduler
 from config import settings
 
 logger = logging.getLogger("ha-mcp-agent.mcp")
@@ -56,9 +56,9 @@ _MEMORY_SCOPE = ("user_id", "agent_id", "app_id", "run_id")
 class PersonalMemory(mcp.MCPToolset):
     """Mem0's tools pinned to one person, so no one reaches another's memories."""
 
-    def __init__(self, *, user: str, **kwargs: Any) -> None:
+    def __init__(self, *, user_id: str, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._user = user
+        self._user_id = user_id
         self._pinned: Any = None
 
     async def setup(self, *, reload: bool = False) -> PersonalMemory:
@@ -78,16 +78,16 @@ class PersonalMemory(mcp.MCPToolset):
             props.pop(key, None)
         if "required" in params:
             params["required"] = [r for r in params["required"] if r in props]
-        name, user = tool.info.name, self._user
+        name, user_id = tool.info.name, self._user_id
 
         async def call(raw_arguments: dict[str, Any]) -> Any:
             args = {k: v for k, v in raw_arguments.items() if k not in _MEMORY_SCOPE}
             if name == "add_memory":
-                args["user_id"] = user
+                args["user_id"] = user_id
             elif "filters" in props:
                 given = args.get("filters")
                 args["filters"] = {
-                    "AND": [{"user_id": user}, *([given] if given else [])]
+                    "AND": [{"user_id": user_id}, *([given] if given else [])]
                 }
             return await tool(args)
 
@@ -97,15 +97,17 @@ class PersonalMemory(mcp.MCPToolset):
 class Guarded(mcp.MCPToolset):
     """A server whose tools a person may not be offered, or may have to confirm.
 
-    With ``user``, it connects only for a person whose Settings-tab entry lists it. A
+    With ``user_id``, it connects only for a person whose Settings-tab entry lists it. A
     tool in ``confirm`` runs only when called again after the person has spoken since
     its first call, which fails with a request to ask them.
     """
 
-    def __init__(self, *, user: str | None, confirm: list[str], **kwargs: Any) -> None:
+    def __init__(
+        self, *, user_id: str | None, confirm: list[str], **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
-        self._user = user
-        self._allowed: bool | None = None if user else True
+        self._user_id = user_id
+        self._allowed: bool | None = None if user_id else True
         self._confirm = set(confirm)
         self._guarded: Any = None
         # tool name -> the person's latest message when it was first called
@@ -113,7 +115,8 @@ class Guarded(mcp.MCPToolset):
 
     async def setup(self, *, reload: bool = False) -> Guarded:
         if self._allowed is None:
-            self._allowed = await people.allows_server(self._user, self.id)
+            person = await scheduler.user(self._user_id)
+            self._allowed = bool(person and self.id in (person.get("servers") or []))
         # left unconnected, the toolset has no tools, so the LLM never sees them
         if not self._allowed:
             return self
@@ -160,7 +163,7 @@ class Guarded(mcp.MCPToolset):
 _PER_PERSON = {"mem0": PersonalMemory}
 
 
-def _toolset(entry: dict[str, Any], user: str | None) -> Toolset | None:
+def _toolset(entry: dict[str, Any], user_id: str | None) -> Toolset | None:
     server_id = entry["id"]
     if any(not os.getenv(var) for var in entry.get("requires") or []):
         return None
@@ -168,15 +171,15 @@ def _toolset(entry: dict[str, Any], user: str | None) -> Toolset | None:
     if not url:
         return None
     restricted = bool(entry.get("restricted"))
-    if restricted and user is None:
+    if restricted and user_id is None:
         return None
     headers = {}
     for name, value in (entry.get("headers") or {}).items():
         if (expanded := _expand(str(value))) is not None:
             headers[name] = expanded
     base = settings.callback_base_url.rstrip("/")
-    if entry.get("callback") and user and base and settings.text_api_token:
-        headers["X-Callback-Url"] = f"{base}/chat/events?user={quote(user)}"
+    if entry.get("callback") and user_id and base and settings.text_api_token:
+        headers["X-Callback-Url"] = f"{base}/chat/events?user={quote(user_id)}"
         headers["X-Callback-Token"] = settings.text_api_token
     kwargs: dict[str, Any] = {
         "id": server_id,
@@ -203,18 +206,20 @@ def _toolset(entry: dict[str, Any], user: str | None) -> Toolset | None:
             f"mcp server {server_id!r}: per_person cannot be restricted or confirmed"
         )
     # no one in particular gets the plain server, e.g. Mem0's default user scope
-    if adapter and user:
-        return _PER_PERSON[adapter](user=user, **kwargs)
+    if adapter and user_id:
+        return _PER_PERSON[adapter](user_id=user_id, **kwargs)
     if restricted or confirm:
-        return Guarded(user=user if restricted else None, confirm=confirm, **kwargs)
+        return Guarded(
+            user_id=user_id if restricted else None, confirm=confirm, **kwargs
+        )
     return mcp.MCPToolset(**kwargs)
 
 
-def toolsets(user: str | None) -> list[Toolset]:
+def toolsets(user_id: str | None) -> list[Toolset]:
     """The configured servers this session gets; none without a config file."""
     path = Path(settings.mcp_config)
     if not path.exists():
         return []
     entries = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("servers")
-    found = [_toolset(entry, user) for entry in entries or []]
+    found = [_toolset(entry, user_id) for entry in entries or []]
     return [t for t in found if t is not None]

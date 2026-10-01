@@ -7,8 +7,8 @@ services:
     # HA_URL, HA_TOKEN, LIVEKIT_* and LIVEKIT_INFERENCE_* — see .env.example
     env_file: .env
     environment:
-      # The scheduler is reachable by service name on the shared network, and the
-      # worker's scheduling tools call it.
+      # ha-notify-scheduler, by service name on the shared network: the worker calls it
+      # for tasks, notifications, turn progress and a person's settings, by user id.
       SCHEDULER_URL: http://ha-notify-scheduler:8080
     volumes:
       # System prompt and MCP server list are mounted (not baked in) so edits apply on the

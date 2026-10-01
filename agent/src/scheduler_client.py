@@ -1,14 +1,15 @@
-"""Async REST client for the scheduler service (the docker-compose 'scheduler').
+"""Async REST client for ha-notify-scheduler, which knows each person behind a user id.
 
-The scheduling function tools call the task CRUD here, and people.py reads the Settings
-tab through `request`. Calls raise RuntimeError with the server detail.
+The agent knows a person only by that id: the scheduling tools call the task CRUD with
+it, and notifications, a text turn's progress and a person's allowed MCP servers go
+through the service by it. Task calls raise RuntimeError with the server detail.
 """
 
 from __future__ import annotations
 
 import logging
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -57,3 +58,32 @@ async def update_task(task_id: str, payload: dict, user: str | None) -> Any:
 
 async def delete_task(task_id: str, user: str | None) -> Any:
     return await request("DELETE", f"/tasks/{task_id}{_owner(user)}")
+
+
+async def notify(user_id: str | None, message: str, title: str | None = None) -> bool:
+    """Send a notification to a person's channels; False when it was not sent."""
+    try:
+        data = await request(
+            "POST", "/notify", {"user": user_id, "message": message, "title": title}
+        )
+    except Exception:
+        logger.exception("failed to send a notification")
+        return False
+    return bool(data and data.get("sent"))
+
+
+async def progress(event: dict[str, Any]) -> None:
+    """Show one phase of a person's text turn on their phone (best-effort)."""
+    try:
+        await request("POST", "/progress", event)
+    except Exception:
+        logger.exception("failed to post turn progress (%s)", event.get("phase"))
+
+
+async def user(user_id: str) -> dict[str, Any] | None:
+    """A person's settings, such as their allowed MCP servers; None when unlisted."""
+    try:
+        return await request("GET", f"/users/{quote(user_id, safe='')}")
+    except Exception:
+        logger.warning("could not read user %s", user_id, exc_info=True)
+        return None

@@ -13,7 +13,6 @@ from livekit.agents import (
     inference,
 )
 
-import people
 import text_chat
 from agent import HomeAssistantAgent
 from config import (
@@ -23,13 +22,14 @@ from config import (
     TOOL_CALL_TOPIC,
     settings,
 )
+from conversations import conversations
 from utils import build_llm, parse_job_metadata, truncate
 
 logger = logging.getLogger("ha-mcp-agent")
 
 
-# the store persists text conversations only; voice sessions do not pass persist=
-server = AgentServer(port=settings.http_port, store=text_chat.store)
+# the store holds the conversations; voice sessions do not join one yet
+server = AgentServer(port=settings.http_port, store=conversations.store)
 text_chat.mount(server)
 
 
@@ -83,9 +83,8 @@ async def entrypoint(ctx: JobContext) -> None:
     turn_detector = inference.TurnDetector()
     stt = inference.STT(settings.stt_model, language=settings.stt_language)
 
-    # the integration names the HA login that asked for this session
-    user = await people.resolve_user(ha_user_id=meta.get("ha_user_id"))
-    agent = HomeAssistantAgent(user=user)
+    # the integration names the person who asked for this session
+    agent = HomeAssistantAgent(user_id=meta.get("user_id") or None)
     session = AgentSession(
         stt=stt,
         llm=build_llm(),
