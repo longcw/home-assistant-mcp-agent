@@ -3,8 +3,8 @@
 Design: the ``tasks`` table is the single source of truth. APScheduler runs purely in memory
 and is rehydrated from the table on boot, so there is only one durable store to reason about
 (no risk of the job store and the task table drifting apart). One-shot tasks use a
-``DateTrigger``; recurring tasks a cron ``CronTrigger``. When a trigger fires we dispatch the
-worker (dispatch.py) and record a ``Run``; the worker later reports the outcome back.
+``DateTrigger``; recurring tasks a cron ``CronTrigger``. When a trigger fires we record a
+``Run``, carry the task out (runner.py), and store its outcome on the run.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from apscheduler.triggers.date import DateTrigger
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
-import dispatch
+import runner
 from config import Config
 from models import Run, Settings, Task
 from schemas import RunOut, SettingsOut, SettingsUpdate, TaskCreate, TaskOut, TaskUpdate
@@ -28,6 +28,8 @@ from schemas import RunOut, SettingsOut, SettingsUpdate, TaskCreate, TaskOut, Ta
 logger = logging.getLogger("scheduler.service")
 
 ACTIVE = "scheduled"
+# a run's stored result is clipped so the task list stays within the agent's tool output
+MAX_RESULT_CHARS = 12000
 
 
 def _utcnow() -> datetime:
@@ -84,7 +86,7 @@ class SchedulerService:
                 run_at=run_at_iso,
                 cron=cron,
                 timezone=req.schedule.timezone,
-                execution=req.execution.model_dump(),
+                execution=req.execution.model_dump(exclude_none=True),
                 status=ACTIVE,
                 enabled=True,
                 created_at=_utcnow_iso(),
@@ -127,7 +129,7 @@ class SchedulerService:
             if req.description is not None:
                 task.description = req.description
             if req.execution is not None:
-                task.execution = req.execution.model_dump()
+                task.execution = req.execution.model_dump(exclude_none=True)
             if req.schedule is not None:
                 run_at_iso, cron = self._validate_schedule(req.schedule)
                 task.schedule_type = req.schedule.type
@@ -158,17 +160,6 @@ class SchedulerService:
         self._remove_job(task_id)
         return out
 
-    def record_run(self, run_id: str, status: str, result: str | None) -> bool:
-        """Called from the worker's report endpoint once a task has executed."""
-        with self._Session() as s:
-            run = s.get(Run, run_id)
-            if run is None:
-                return False
-            run.status = status
-            run.result = result
-            s.commit()
-            return True
-
     # --- settings ------------------------------------------------------------------
 
     def get_settings(self) -> SettingsOut:
@@ -198,7 +189,8 @@ class SchedulerService:
     # --- firing --------------------------------------------------------------------
 
     async def _fire(self, task_id: str) -> None:
-        """APScheduler callback. Records a pending run then dispatches the worker."""
+        """APScheduler callback. Records a pending run, carries the task out, and stores
+        its outcome on the run."""
         with self._Session() as s:
             task = s.get(Task, task_id)
             if task is None or not task.enabled or task.status == "cancelled":
@@ -215,20 +207,18 @@ class SchedulerService:
             user = task.user
             s.commit()
 
-        room = f"sched-{task_id[:8]}-{run_id[:8]}"
-        try:
-            await dispatch.dispatch_scheduled(
-                self.cfg,
-                task_id=task_id,
-                description=description,
-                execution=execution,
-                run_id=run_id,
-                room=room,
-                user=user,
-            )
-        except Exception as exc:  # noqa: BLE001 - dispatch failure is a run failure
-            logger.exception("failed to dispatch task %s", task_id)
-            self.record_run(run_id, "error", f"dispatch failed: {exc}")
+        # a person's notification channels; HA's own for anyone else
+        people = {p.name.casefold(): p for p in self.get_settings().users}
+        person = people.get(user) if user else None
+        targets = person.notify_targets if person else ["persistent_notification"]
+        logger.info("running task %s (run %s): %s", task_id, run_id, description)
+        status, result = await runner.run(self.cfg, description, execution, user, targets)
+        with self._Session() as s:
+            run = s.get(Run, run_id)
+            if run is not None:  # the task was deleted while it ran
+                run.status = status
+                run.result = result[:MAX_RESULT_CHARS]
+                s.commit()
 
     # --- helpers -------------------------------------------------------------------
 

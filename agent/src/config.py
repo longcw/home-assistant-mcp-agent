@@ -41,8 +41,6 @@ class Settings:
     prompt_file: str
     # Seconds after the mic is gated before STT (billed continuously) is torn down.
     stt_idle_timeout: float
-    # Upper bound on a single headless scheduled execution before it's abandoned.
-    scheduled_run_timeout: float
     # Scheduler service base URL and optional bearer token (empty = no auth).
     scheduler_url: str
     scheduler_token: str
@@ -94,7 +92,6 @@ def load_settings() -> Settings:
         agent_name=os.getenv("AGENT_NAME", "ha-agent"),
         prompt_file=os.getenv("PROMPT_FILE", os.path.join(_AGENT_ROOT, "prompt.yaml")),
         stt_idle_timeout=float(os.getenv("STT_IDLE_TIMEOUT", "120")),
-        scheduled_run_timeout=float(os.getenv("SCHEDULED_RUN_TIMEOUT", "120")),
         scheduler_url=os.getenv("SCHEDULER_URL", "http://scheduler:8080"),
         scheduler_token=os.getenv("SCHEDULER_TOKEN", ""),
         agent_tz=os.getenv("AGENT_TZ") or os.getenv("TZ") or "UTC",

@@ -25,7 +25,7 @@ from livekit.agents.metrics import LLMModelUsage
 from livekit.agents.store import LocalStore, StoreError
 
 import ha
-import scheduler_client as scheduler
+import people
 from agent import HomeAssistantAgent
 from config import UPDATE_PREFIX, settings
 from utils import build_llm
@@ -210,7 +210,7 @@ class _Conversation:
                 return conversation_id, "Started a new conversation."
             _record(conversation_id, self._user, text)
             _suggested.setdefault(conversation_id, []).clear()
-            self._progress.target = await scheduler.phone(self._user)
+            self._progress.target = await people.phone(self._user)
             if self._progress.target:
                 self._progress.begin(text)
                 if self._listener is None or self._listener.done():
@@ -727,7 +727,7 @@ def mount(server: AgentServer) -> None:
 
     async def conversation_for(name: object, ha_user_id: object) -> _Conversation:
         """The conversation of the person a request names, or its HA login's."""
-        user = await scheduler.resolve_user(
+        user = await people.resolve_user(
             str(name) if name else None, str(ha_user_id) if ha_user_id else None
         )
         if user not in conversations:
@@ -773,6 +773,9 @@ def mount(server: AgentServer) -> None:
             return PlainTextResponse(f"[error] {exc}", status_code=502)
         status = 200 if wait or not text else 202
         headers = {"X-Conversation-Id": conversation_id}
+        if conversation._progress.target:
+            # the phone showing the turn, which needs no other word of its answer
+            headers["X-Phone"] = conversation._progress.target
         return PlainTextResponse(reply, status_code=status, headers=headers)
 
     @server.http.get(f"{CHAT_PATH}/history")

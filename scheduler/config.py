@@ -1,9 +1,7 @@
 """Runtime configuration for the scheduler service, read from the environment.
 
 The service shares the repo-root ``.env`` with the agent worker (see docker-compose.yml),
-so LiveKit credentials and ``AGENT_NAME`` are the same values the worker uses. It needs the
-LiveKit *server* credentials (not the inference gateway) because it dispatches the worker
-into rooms via the AgentDispatchService API.
+so the Home Assistant credentials and ``TEXT_API_TOKEN`` are the values the worker uses.
 """
 
 from __future__ import annotations
@@ -14,12 +12,14 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Config:
-    livekit_url: str
-    livekit_api_key: str
-    livekit_api_secret: str
-    # Dispatch name of the worker to fire scheduled tasks against; must match the worker's
-    # AGENT_NAME (agent/agent.py) and the integration's configured agent name.
-    agent_name: str
+    # Home Assistant base URL and long-lived token, for a reminder's notification.
+    ha_url: str
+    ha_token: str
+    # The agent's text chat endpoint and its bearer token, which run an instruction.
+    chat_url: str
+    chat_token: str
+    # Seconds a fired instruction may take, waiting out the person's running turn included.
+    run_timeout: float
     # SQLite file; the source of truth for tasks + run history. Mounted on a volume so it
     # survives container restarts (see docker-compose.yml).
     db_path: str
@@ -36,10 +36,11 @@ class Config:
 
 def load_config() -> Config:
     return Config(
-        livekit_url=os.environ.get("LIVEKIT_URL", ""),
-        livekit_api_key=os.environ.get("LIVEKIT_API_KEY", ""),
-        livekit_api_secret=os.environ.get("LIVEKIT_API_SECRET", ""),
-        agent_name=os.environ.get("AGENT_NAME", "ha-agent"),
+        ha_url=os.environ.get("HA_URL", ""),
+        ha_token=os.environ.get("HA_TOKEN", ""),
+        chat_url=os.environ.get("AGENT_CHAT_URL", "http://agent:8081/chat"),
+        chat_token=os.environ.get("TEXT_API_TOKEN", ""),
+        run_timeout=float(os.environ.get("SCHEDULED_RUN_TIMEOUT", "200")),
         db_path=os.environ.get("SCHEDULER_DB", "/data/scheduler.db"),
         default_tz=os.environ.get("AGENT_TZ") or os.environ.get("TZ") or "UTC",
         misfire_grace_seconds=int(os.environ.get("MISFIRE_GRACE_SECONDS", "3600")),

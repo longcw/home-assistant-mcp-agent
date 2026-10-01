@@ -1,8 +1,7 @@
 """FastAPI surface for the scheduler service.
 
-Reachable only from inside the compose network: the worker's scheduling tools call the
-``/tasks`` CRUD endpoints, and the worker reports each run's outcome to ``/internal/runs``.
-Nothing on the LAN talks to it directly.
+The worker's scheduling tools call the ``/tasks`` CRUD endpoints over the compose network,
+and the Home Assistant integration reads tasks and settings through the published port.
 """
 
 from __future__ import annotations
@@ -16,14 +15,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 
 from config import load_config
 from db import make_engine, make_session_factory
-from schemas import (
-    RunReport,
-    SettingsOut,
-    SettingsUpdate,
-    TaskCreate,
-    TaskOut,
-    TaskUpdate,
-)
+from schemas import SettingsOut, SettingsUpdate, TaskCreate, TaskOut, TaskUpdate
 from service import SchedulerService
 
 logging.basicConfig(level=logging.INFO)
@@ -109,13 +101,6 @@ def delete_task(task_id: str, who: Owner) -> TaskOut:
     if out is None:
         raise HTTPException(status_code=404, detail="task not found")
     return out
-
-
-@app.post("/internal/runs/{run_id}", dependencies=guard)
-def report_run(run_id: str, report: RunReport) -> dict:
-    if not service.record_run(run_id, report.status, report.result):
-        raise HTTPException(status_code=404, detail="run not found")
-    return {"ok": True}
 
 
 @app.get("/settings", response_model=SettingsOut, dependencies=guard)

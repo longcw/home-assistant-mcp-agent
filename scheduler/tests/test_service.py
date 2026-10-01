@@ -1,14 +1,18 @@
 """Unit tests for SchedulerService CRUD, validation, firing, and rehydration.
 
-Dispatch (the only external dependency) is monkeypatched, so these run without LiveKit.
+The runner's HTTP calls go to a mock transport, so these run without Home Assistant or
+the agent.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 
+import runner
 import service as service_module
 from config import Config
 from db import make_engine, make_session_factory
@@ -26,10 +30,11 @@ from service import SchedulerService
 
 def make_service(tmp_path) -> SchedulerService:
     cfg = Config(
-        livekit_url="wss://example",
-        livekit_api_key="k",
-        livekit_api_secret="s",
-        agent_name="ha-agent",
+        ha_url="http://ha",
+        ha_token="ha-token",
+        chat_url="http://agent/chat",
+        chat_token="chat-token",
+        run_timeout=5,
         db_path=str(tmp_path / "s.db"),
         default_tz="UTC",
         misfire_grace_seconds=3600,
@@ -52,9 +57,7 @@ def test_create_once_task(tmp_path):
             schedule=ScheduleSpec(
                 type="once", run_at=future_iso(hours=1), timezone="UTC"
             ),
-            execution=ExecutionSpec(
-                steps=[{"tool": "HassTurnOff", "args": {"name": "AC"}}]
-            ),
+            execution=ExecutionSpec(instruction="turn off the AC"),
         )
     )
     assert out.status == "scheduled"
@@ -64,52 +67,29 @@ def test_create_once_task(tmp_path):
     assert len(svc.list_tasks()) == 1
 
 
-def test_create_multi_step_task(tmp_path):
+def test_create_reminder(tmp_path):
     svc = make_service(tmp_path)
     out = svc.create_task(
         TaskCreate(
-            description="turn on the fan and set it to 50%",
+            description="buy soap",
             schedule=ScheduleSpec(
                 type="once", run_at=future_iso(hours=1), timezone="UTC"
             ),
-            execution=ExecutionSpec(
-                steps=[
-                    {"tool": "HassTurnOn", "args": {"name": "fan"}},
-                    {
-                        "tool": "HassSetPosition",
-                        "args": {"name": "fan", "position": 50},
-                    },
-                ]
-            ),
+            execution=ExecutionSpec(notification={"message": "time to buy soap"}),
         )
     )
-    stored = svc.get_task(out.id).execution
-    assert [s["tool"] for s in stored["steps"]] == ["HassTurnOn", "HassSetPosition"]
-    assert stored["instruction"] is None
+    assert svc.get_task(out.id).execution == {
+        "notification": {"message": "time to buy soap"}
+    }
 
 
-def test_create_steps_plus_instruction(tmp_path):
-    svc = make_service(tmp_path)
-    out = svc.create_task(
-        TaskCreate(
-            description="fetch weather then summarize",
-            schedule=ScheduleSpec(
-                type="once", run_at=future_iso(hours=1), timezone="UTC"
-            ),
-            execution=ExecutionSpec(
-                steps=[{"tool": "GetWeather", "args": {}}],
-                instruction="tell me tomorrow's weather in one sentence",
-            ),
-        )
-    )
-    stored = svc.get_task(out.id).execution
-    assert len(stored["steps"]) == 1
-    assert stored["instruction"] == "tell me tomorrow's weather in one sentence"
-
-
-def test_execution_requires_steps_or_instruction():
+def test_execution_needs_exactly_one_kind():
     with pytest.raises(ValueError):
         ExecutionSpec()
+    with pytest.raises(ValueError):
+        ExecutionSpec(instruction="  ")
+    with pytest.raises(ValueError):
+        ExecutionSpec(notification={"message": "x"}, instruction="do it")
 
 
 def test_reject_past_time(tmp_path):
@@ -194,40 +174,94 @@ def test_update_reschedule(tmp_path):
     assert updated.run_at == new_at
 
 
-async def test_fire_dispatches_and_records(tmp_path, monkeypatch):
-    svc = make_service(tmp_path)
-    calls = []
+def mock_http(monkeypatch, handler) -> list[httpx.Request]:
+    """Route the runner's HTTP calls to ``handler``; returns the requests it got."""
+    requests: list[httpx.Request] = []
+    real = httpx.AsyncClient
 
-    async def fake_dispatch(
-        cfg, *, task_id, description, execution, run_id, room, user
-    ):
-        calls.append((task_id, run_id, execution, user))
+    def record(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return handler(request)
 
-    monkeypatch.setattr(service_module.dispatch, "dispatch_scheduled", fake_dispatch)
+    def client(**kwargs) -> httpx.AsyncClient:
+        return real(transport=httpx.MockTransport(record), **kwargs)
 
-    out = svc.create_task(
+    monkeypatch.setattr(runner.httpx, "AsyncClient", client)
+    return requests
+
+
+def fire_once(svc: SchedulerService, execution: ExecutionSpec, user: str | None) -> str:
+    return svc.create_task(
         TaskCreate(
             description="fire me",
             schedule=ScheduleSpec(
                 type="once", run_at=future_iso(hours=1), timezone="UTC"
             ),
-            execution=ExecutionSpec(
-                steps=[{"tool": "HassTurnOff", "args": {"name": "AC"}}]
-            ),
-            user="alice",
+            execution=execution,
+            user=user,
         )
+    ).id
+
+
+async def test_fire_sends_a_reminder(tmp_path, monkeypatch):
+    svc = make_service(tmp_path)
+    svc.update_settings(
+        SettingsUpdate(users=[UserSettings(name="Alice", notify_targets=["mobile_app_a"])])
     )
-    await svc._fire(out.id)
+    requests = mock_http(monkeypatch, lambda _: httpx.Response(200, json=[]))
+    task_id = fire_once(svc, ExecutionSpec(notification={"message": "soap"}), "alice")
+    await svc._fire(task_id)
 
-    assert len(calls) == 1
-    assert calls[0][3] == "alice"
-    task = svc.get_task(out.id, owner="alice")
+    assert [r.url.path for r in requests] == ["/api/services/notify/mobile_app_a"]
+    assert requests[0].headers["authorization"] == "Bearer ha-token"
+    task = svc.get_task(task_id, owner="alice")
     assert task.status == "completed"  # one-shot is done after firing
-    assert len(task.runs) == 1 and task.runs[0].status == "pending"
+    assert [(r.status, r.result) for r in task.runs] == [("success", "Notification sent.")]
 
-    run_id = calls[0][1]
-    assert svc.record_run(run_id, "success", "done") is True
-    assert svc.get_task(out.id, owner="alice").runs[0].status == "success"
+
+async def test_fire_sends_an_instruction_to_the_agent(tmp_path, monkeypatch):
+    svc = make_service(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/chat":
+            return httpx.Response(200, text="AC is off.", headers={"X-Phone": "mobile_app_a"})
+        return httpx.Response(200, json=[])
+
+    requests = mock_http(monkeypatch, handler)
+    task_id = fire_once(svc, ExecutionSpec(instruction="turn off the AC"), "alice")
+    await svc._fire(task_id)
+
+    # the phone showed the turn, so nothing else is sent
+    assert [r.url.path for r in requests] == ["/chat"]
+    sent = requests[0]
+    assert sent.headers["authorization"] == "Bearer chat-token"
+    body = json.loads(sent.content)
+    assert body["text"] == "[Scheduled task due: fire me] turn off the AC"
+    assert body["user"] == "alice" and body["wait"] and not body["interrupt"]
+    runs = svc.get_task(task_id, owner="alice").runs
+    assert [(r.status, r.result) for r in runs] == [("success", "AC is off.")]
+
+
+async def test_fire_reports_a_failed_turn(tmp_path, monkeypatch):
+    svc = make_service(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/chat":
+            return httpx.Response(200, text="[failed] no such device")
+        return httpx.Response(200, json=[])
+
+    requests = mock_http(monkeypatch, handler)
+    task_id = fire_once(svc, ExecutionSpec(instruction="turn off the AC"), None)
+    await svc._fire(task_id)
+
+    # no phone showed it, so HA's own notification tells of the failure
+    assert [r.url.path for r in requests] == [
+        "/chat",
+        "/api/services/persistent_notification/create",
+    ]
+    assert json.loads(requests[1].content)["title"] == "Scheduled task failed"
+    run = svc.get_task(task_id).runs[0]
+    assert (run.status, run.result) == ("error", "[failed] no such device")
 
 
 def test_rehydrate_marks_missed(tmp_path):
@@ -242,7 +276,7 @@ def test_rehydrate_marks_missed(tmp_path):
                 run_at=(datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
                 cron=None,
                 timezone="UTC",
-                execution={"steps": [], "instruction": "x"},
+                execution={"instruction": "x"},
                 status="scheduled",
                 enabled=True,
                 created_at=service_module._utcnow_iso(),

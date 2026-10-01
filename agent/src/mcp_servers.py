@@ -27,7 +27,7 @@ from livekit.agents.llm import (
 )
 
 import ha
-import scheduler_client as scheduler
+import people
 from config import settings
 
 logger = logging.getLogger("ha-mcp-agent.mcp")
@@ -113,7 +113,7 @@ class Guarded(mcp.MCPToolset):
 
     async def setup(self, *, reload: bool = False) -> Guarded:
         if self._allowed is None:
-            self._allowed = await scheduler.allows_server(self._user, self.id)
+            self._allowed = await people.allows_server(self._user, self.id)
         # left unconnected, the toolset has no tools, so the LLM never sees them
         if not self._allowed:
             return self

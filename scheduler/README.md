@@ -7,28 +7,28 @@ hour") or recurring ("every weekday at 8am") — even after the user closes the 
 ## How it fits together
 
 ```
-agent worker ──REST (create/list/cancel/report)──► scheduler ──LiveKit dispatch──► agent worker
-                                                    (SQLite)      (fire time, headless)
+agent worker ──REST (create/list/cancel)──► scheduler ──notify service──► Home Assistant
+                                             (SQLite)  ──POST /chat────► agent worker
 ```
 
 - The worker exposes `schedule_task` / `list_scheduled_tasks` / `cancel_scheduled_task` /
   `update_scheduled_task` function tools that call this service over the compose network.
-- At fire time the service **dispatches the worker into a fresh room** (`kind: "scheduled"`
-  metadata). The worker runs the task headlessly (no STT/TTS), reports the outcome back to
-  `/internal/runs/{run_id}`, and raises a Home Assistant persistent notification.
+- At fire time the service carries the task out itself (`runner.py`) and stores the outcome
+  on the task's run history. No LiveKit room or job is involved.
 - SQLite (`SCHEDULER_DB`, on a volume) is the source of truth; APScheduler runs in memory and
   is rehydrated from the table on boot.
 
-This service holds **no** Home Assistant credentials — all HA access stays in the worker.
-
 ## Execution kinds
 
-A task's `execution` is `{steps, instruction}`:
+A task's `execution` holds exactly one of:
 
-- `steps` — tool calls + args replayed exactly at fire time (no LLM), stopping at the first
-  failure. The agent uses them for reminders (one `send_notification`).
-- `instruction` — the action to do at fire time, sent as a message in the person's text
-  conversation, so the agent resolves devices then, sees a failing tool and can retry.
+- `notification` — `{message, title?}`, a reminder sent to the owner's Home Assistant
+  channels (the Settings tab's devices for a person, HA's own notification for anyone else).
+  The title defaults to the task's description.
+- `instruction` — the action to do at fire time, sent as a message in the owner's text
+  conversation (`POST /chat` with `wait`), so the agent resolves devices then, sees a
+  failing tool and can retry. The reply is the run's result. When no phone showed the turn
+  (no `X-Phone` header), the reply or the failure is also sent as a notification.
 
 ## API
 
@@ -39,15 +39,16 @@ A task's `execution` is `{steps, instruction}`:
 | `GET` | `/tasks/{id}` | One task + its run history. |
 | `PATCH` | `/tasks/{id}` | Modify time / execution / enabled. |
 | `DELETE` | `/tasks/{id}` | Cancel a task. |
-| `POST` | `/internal/runs/{run_id}` | Worker reports a run's outcome. |
 | `GET` | `/healthz` | Liveness. |
 
 ## Config (env, shared `.env`)
 
 | Var | Purpose |
 | --- | --- |
-| `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | Dispatch the worker at fire time. |
-| `AGENT_NAME` | Worker dispatch name (must match the worker). |
+| `HA_URL` / `HA_TOKEN` | Send reminders and run notifications through Home Assistant. |
+| `AGENT_CHAT_URL` | The agent's text chat endpoint (default `http://agent:8081/chat`). |
+| `TEXT_API_TOKEN` | Bearer token for that endpoint; unset, instructions fail. |
+| `SCHEDULED_RUN_TIMEOUT` | Seconds an instruction may take, waiting out a running turn included (default 200). |
 | `AGENT_TZ` (or `TZ`) | Default timezone for schedules. |
 | `SCHEDULER_DB` | SQLite path (default `/data/scheduler.db`). |
 | `MISFIRE_GRACE_SECONDS` | Run a one-shot missed during an outage if within this window (default 3600). |

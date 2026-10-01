@@ -7,8 +7,8 @@ services:
     # HA_URL, HA_TOKEN, LIVEKIT_* and LIVEKIT_INFERENCE_* — see .env.example
     env_file: .env
     environment:
-      # The scheduler is reachable by service name on the shared network. The worker's
-      # scheduling tools call it, and the headless fire-time branch reports runs to it.
+      # The scheduler is reachable by service name on the shared network, and the
+      # worker's scheduling tools call it.
       SCHEDULER_URL: http://scheduler:8080
     volumes:
       # System prompt and MCP server list are mounted (not baked in) so edits apply on the
@@ -35,8 +35,8 @@ services:
       context: ./scheduler
     container_name: home-assistant-mcp-scheduler
     restart: always
-    # Needs LIVEKIT_* (to dispatch the worker at fire time), AGENT_NAME, AGENT_TZ, and
-    # (once exposed) SCHEDULER_TOKEN. Holds NO Home Assistant creds — all HA access is the worker's.
+    # Needs HA_URL/HA_TOKEN (to send reminders), TEXT_API_TOKEN (to hand an instruction to
+    # the agent's /chat at http://agent:8081), AGENT_TZ, and (once exposed) SCHEDULER_TOKEN.
     env_file: .env
     environment:
       SCHEDULER_DB: /data/scheduler.db

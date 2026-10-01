@@ -2,13 +2,12 @@
 
 The worker's scheduling tools speak this shape (see agent/agent.py), and the card renders the
 ``TaskOut`` payload the tools return. ``ScheduleSpec`` carries a discriminating ``type``;
-``ExecutionSpec`` holds a list of deterministic ``steps`` and/or a natural-language
-``instruction``.
+``ExecutionSpec`` holds a reminder's ``notification`` or a natural-language ``instruction``.
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal, Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -31,31 +30,29 @@ class ScheduleSpec(BaseModel):
         return self
 
 
-class ToolCall(BaseModel):
-    """One tool call (e.g. a reminder's send_notification) replayed at fire time."""
+class Notification(BaseModel):
+    """A reminder, sent as is; the title defaults to the task's description."""
 
-    tool: str
-    args: dict[str, Any] = Field(default_factory=dict)
+    message: str
+    title: Optional[str] = None
 
 
 class ExecutionSpec(BaseModel):
-    """What a task does, in one shape:
+    """What a task does at fire time, exactly one of:
 
-    - ``steps``: an ordered list of concrete tool calls, replayed exactly. They run in order
-      and stop at the first failure; the agent uses them for reminders only.
-    - ``instruction``: what to do at fire time, sent after the steps as a message in the
-      person's text conversation, where the agent carries it out.
-
-    At least one of the two must be present.
+    - ``notification``: sent to the owner's Home Assistant channels.
+    - ``instruction``: sent as a message in the owner's text conversation, where the agent
+      carries it out.
     """
 
-    steps: list[ToolCall] = Field(default_factory=list)
+    notification: Optional[Notification] = None
     instruction: Optional[str] = None
 
     @model_validator(mode="after")
     def _check(self) -> "ExecutionSpec":
-        if not self.steps and not (self.instruction and self.instruction.strip()):
-            raise ValueError("execution needs at least one step or an instruction")
+        has_instruction = bool(self.instruction and self.instruction.strip())
+        if (self.notification is not None) == has_instruction:
+            raise ValueError("execution needs exactly one of notification or instruction")
         return self
 
 
@@ -95,13 +92,6 @@ class TaskOut(BaseModel):
     # The next fire instant (ISO). For recurring tasks this is APScheduler's computed next run.
     next_run_at: Optional[str] = None
     runs: list[RunOut] = Field(default_factory=list)
-
-
-class RunReport(BaseModel):
-    """Posted by the worker after it executes a scheduled task."""
-
-    status: Literal["success", "error"]
-    result: Optional[str] = None
 
 
 class UserSettings(BaseModel):

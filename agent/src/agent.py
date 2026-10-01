@@ -1,6 +1,5 @@
 """The HomeAssistantAgent: HA MCP tools, live-state helpers, and scheduling tools."""
 
-import asyncio
 import json
 import logging
 import time
@@ -19,25 +18,15 @@ from livekit.agents.llm import (
     Toolset,
     function_tool,
 )
-from pydantic import BaseModel, Field
 
 import ha
 import mcp_servers
+import people
 import scheduler_client as scheduler
 from config import LIVE_CONTEXT_TOOL, UPDATE_PREFIX, settings
 from utils import current_time_text, to_aware_iso
 
 logger = logging.getLogger("ha-mcp-agent")
-
-
-class ToolCall(BaseModel):
-    """One tool call a scheduled task replays exactly: a tool name + its arguments."""
-
-    tool: str = Field(description="Tool to call: 'send_notification'.")
-    args: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Arguments for the tool, e.g. {'message': 'Time to leave'}.",
-    )
 
 
 def load_instructions() -> str:
@@ -114,14 +103,6 @@ class HomeAssistantAgent(Agent):
             tools = []
         return Agent.default.llm_node(self, chat_ctx, tools, model_settings)
 
-    async def tool_context(self) -> ToolContext:
-        """All callable tools in one context, with every toolset connected."""
-        # scheduled steps replay tools without a session, so nothing else connects the
-        # MCP toolsets there; setup() is a no-op once connected.
-        toolsets = [t for t in self.tools if isinstance(t, Toolset)]
-        await asyncio.gather(*(t.setup() for t in toolsets), return_exceptions=True)
-        return ToolContext(self.tools)
-
     @function_tool
     async def get_areas(self) -> list[str]:
         """Get all areas in the home"""
@@ -195,7 +176,7 @@ class HomeAssistantAgent(Agent):
             title: Optional short title.
         """
         logger.info("send_notification: %s", message)
-        targets = await scheduler.notify_targets(self.user)
+        targets = await people.notify_targets(self.user)
         ok = await ha.notify(message, title=title, targets=targets)
         return "Notification sent." if ok else "Failed to send the notification."
 
@@ -210,18 +191,18 @@ class HomeAssistantAgent(Agent):
         schedule_type: Literal["once", "recurring"],
         run_at: str | None = None,
         cron: str | None = None,
-        steps: list[ToolCall] | None = None,
+        notification: str | None = None,
         instruction: str | None = None,
     ) -> str:
         """Schedule a task to run later, once or on a recurring schedule.
 
         Schedule without asking first; if the user corrects it, cancel the wrong task.
 
-        A reminder is `steps` holding one send_notification call, replayed exactly.
-        Anything else, device actions included, is an `instruction`: at fire time it is
-        sent as a message in the user's conversation and you carry it out then. Write
-        it as the action to do at that moment, without the time, e.g. "Turn off the
-        bedroom AC" for "turn off the bedroom AC in an hour".
+        A reminder is a `notification`, sent as is. Anything else, device actions
+        included, is an `instruction`: at fire time it is sent as a message in the
+        user's conversation and you carry it out then. Write it as the action to do at
+        that moment, without the time, e.g. "Turn off the bedroom AC" for "turn off the
+        bedroom AC in an hour". Give exactly one of the two.
 
         Args:
             description: Short summary, e.g. "Turn off the master bedroom AC".
@@ -229,7 +210,7 @@ class HomeAssistantAgent(Agent):
             run_at: For "once": absolute local time in ISO 8601, e.g.
                 "2026-07-22T17:30". Resolve relative times yourself.
             cron: For "recurring": a 5-field cron expression, e.g. "0 8 * * 1-5".
-            steps: For a reminder, the send_notification call to replay.
+            notification: For a reminder, its text in the user's language.
             instruction: What to do when the task fires, in the user's language.
         """
         logger.info("schedule_task: %s [%s]", description, schedule_type)
@@ -252,20 +233,14 @@ class HomeAssistantAgent(Agent):
         else:
             raise ToolError(f"unknown schedule_type {schedule_type!r}.")
 
-        steps = steps or []
-        # a frozen device call goes stale when a device is renamed, so only a
-        # reminder is replayed as is
-        if any(step.tool != "send_notification" for step in steps):
-            raise ToolError(
-                "steps only hold send_notification; put other actions in instruction."
-            )
-        instruction_text = instruction.strip() if instruction else None
-        if not steps and not instruction_text:
-            raise ToolError("provide steps (tool calls) and/or an instruction.")
-        execution = {
-            "steps": [s.model_dump() for s in steps],
-            "instruction": instruction_text,
-        }
+        notification = (notification or "").strip()
+        instruction = (instruction or "").strip()
+        if bool(notification) == bool(instruction):
+            raise ToolError("give exactly one of notification or instruction.")
+        if notification:
+            execution: dict[str, Any] = {"notification": {"message": notification}}
+        else:
+            execution = {"instruction": instruction}
 
         try:
             task = await scheduler.create_task(
@@ -369,8 +344,7 @@ class HomeAssistantAgent(Agent):
         self, name: str, arguments: dict[str, Any] | None = None
     ) -> str:
         """Invoke a single MCP tool by name (used for GetLiveContext)."""
-        ctx = await self.tool_context()
-        if fnc_tool := ctx.get_function_tool(name):
+        if fnc_tool := ToolContext(self.tools).get_function_tool(name):
             return await fnc_tool(arguments or {})
         raise RuntimeError(f"MCP tool {name!r} is not available on the server")
 
