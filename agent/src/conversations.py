@@ -46,6 +46,8 @@ class Conversations:
         self.live: dict[str, AgentSession] = {}
         # what the agent's suggest_replies offered in each conversation's running turn
         self.suggested: dict[str, list[str]] = {}
+        # unloaded conversations as last read, with their files' stamp then
+        self._read: dict[str, tuple[tuple[int, ...], list]] = {}
         self._data: dict[str, Any] | None = None
 
     def _index(self) -> dict[str, Any]:
@@ -176,18 +178,31 @@ class Conversations:
         """A conversation's chat items, from its loaded session or else the store."""
         if (session := self.live.get(conversation_id)) is not None:
             return list(session.history.items)
+        # nothing writes to an unloaded conversation, so the last read holds until its
+        # files change, as loading and closing it does
+        cached = self._read.get(conversation_id)
+        if cached is not None and cached[0] == self._stamp(conversation_id):
+            return cached[1]
         # not loaded, so read what was saved; this stamps the row closed again, and
         # leaves a new conversation an empty row that loads as new
         stored = self.stored(conversation_id)
+        items: list = []
         try:
             record = await stored.load()
-            return list(record.history) if record else []
+            items = list(record.history) if record else []
         except StoreError:
             logger.warning("could not read conversation %s", conversation_id)
             return []
         finally:
             with contextlib.suppress(StoreError):
                 await stored.release()
+        # stamped after the release, which writes to the file too
+        self._read[conversation_id] = (self._stamp(conversation_id), items)
+        return items
+
+    def _stamp(self, conversation_id: str) -> tuple[int, ...]:
+        paths = sorted((self._dir / "sessions").glob(f"{conversation_id}.sqlite*"))
+        return tuple(n for p in paths for n in (p.stat().st_mtime_ns, p.stat().st_size))
 
     async def listing(self, user_id: str | None) -> list[dict[str, Any]]:
         """A person's conversations, latest first, titled by their first message."""
@@ -233,6 +248,7 @@ class Conversations:
         self._index()["conversations"].pop(conversation_id, None)
         self._save()
         self.suggested.pop(conversation_id, None)
+        self._read.pop(conversation_id, None)
         logger.info("deleted text conversation %s", conversation_id)
 
 

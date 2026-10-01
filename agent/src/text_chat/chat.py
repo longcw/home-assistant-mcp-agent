@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import time
@@ -329,10 +330,13 @@ class TextChat:
         }
 
     async def history(
-        self, limit: int, conversation_id: str | None = None
+        self, limit: int, conversation_id: str | None = None, version: str = ""
     ) -> dict[str, Any] | None:
         """A conversation's latest ``limit`` messages and tool calls, shaped like the
-        card's conversation items: the current one, or another of this person's."""
+        card's conversation items: the current one, or another of this person's.
+
+        Given the ``version`` the caller last saw, an unchanged one comes back as just
+        ``unchanged`` with whether a turn runs."""
         current = conversations.current(self.user_id)
         if conversation_id and conversation_id != current:
             if not conversations.owns(self.user_id, conversation_id):
@@ -344,14 +348,21 @@ class TextChat:
         items = await conversations.items(conversation_id) if conversation_id else []
         pending = (turn.text, turn.sent_at) if turn else None
         shown, suggestions = render(items, pending)
-        return {
+        content = {
             "conversation_id": conversation_id,
             "current": live,
-            "busy": turn is not None,
-            # the running turn's task, which POST /chat/cancel takes
-            "task_id": (turn.stream.task_id or None) if turn else None,
             "items": shown[-limit:],
             "suggestions": suggestions,
             # the LLM tokens it has used, cached input counted within input
             "usage": conversations.usage(conversation_id) if conversation_id else None,
         }
+        digest = json.dumps(content, sort_keys=True, ensure_ascii=False).encode()
+        state = {
+            "version": hashlib.sha1(digest).hexdigest()[:16],
+            "busy": turn is not None,
+            # the running turn's task, which POST /chat/cancel takes
+            "task_id": (turn.stream.task_id or None) if turn else None,
+        }
+        if version == state["version"]:
+            return {"unchanged": True, **state}
+        return {**content, **state}

@@ -97,11 +97,11 @@ def mount(server: AgentServer) -> None:
 
     @server.http.get(f"{CHAT_PATH}/history")
     async def chat_history(
-        limit: int = 200, user: str = "", conversation_id: str = ""
+        limit: int = 200, user: str = "", conversation_id: str = "", version: str = ""
     ) -> JSONResponse:
         """A person's current conversation, or one they name, for a UI; `busy` while
-        a turn runs."""
-        history = await chat_of(user).history(limit, conversation_id or None)
+        a turn runs, and only `unchanged` when it matches the `version` given."""
+        history = await chat_of(user).history(limit, conversation_id or None, version)
         if history is None:
             return JSONResponse({"detail": "no such conversation"}, status_code=404)
         return JSONResponse(history)
