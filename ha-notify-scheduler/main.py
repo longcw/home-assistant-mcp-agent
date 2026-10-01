@@ -15,7 +15,14 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 
 from config import load_config
 from db import make_engine, make_session_factory
-from schemas import SettingsOut, SettingsUpdate, TaskCreate, TaskOut, TaskUpdate
+from schemas import (
+    SettingsOut,
+    SettingsUpdate,
+    TaskCreate,
+    TaskOut,
+    TaskUpdate,
+    UserSettings,
+)
 from service import SchedulerService
 
 logging.basicConfig(level=logging.INFO)
@@ -101,6 +108,19 @@ def delete_task(task_id: str, who: Owner) -> TaskOut:
     if out is None:
         raise HTTPException(status_code=404, detail="task not found")
     return out
+
+
+@app.get("/users/resolve", dependencies=guard)
+def resolve_user(ha_user_id: str) -> dict:
+    """The id of the person linked to an HA login; null for none."""
+    return {"id": service.owner(None, ha_user_id)}
+
+
+@app.get("/users/{user_id}", response_model=UserSettings, dependencies=guard)
+def get_user(user_id: str) -> UserSettings:
+    if (person := service.user(user_id)) is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    return person
 
 
 @app.get("/settings", response_model=SettingsOut, dependencies=guard)

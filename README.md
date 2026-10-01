@@ -35,7 +35,7 @@ worker, install that integration, point both at the same LiveKit project, and yo
 │   ├── mcp.yaml      # MCP servers besides Home Assistant's (bind-mounted too)
 │   ├── pyproject.toml
 │   └── Dockerfile
-├── scheduler/        # task scheduler service (FastAPI + APScheduler)
+├── ha-notify-scheduler/  # people, scheduled tasks and HA notifications (FastAPI + APScheduler)
 ├── docker-compose.yml
 ├── .env.example      # agent + scheduler env
 └── README.md

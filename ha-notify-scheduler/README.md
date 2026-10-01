@@ -1,14 +1,16 @@
-# Scheduler service
+# ha-notify-scheduler
 
-A small FastAPI + [APScheduler](https://apscheduler.readthedocs.io/) service that lets the
-voice agent schedule Home Assistant tasks to run later — one-shot ("turn off the AC in 1
-hour") or recurring ("every weekday at 8am") — even after the user closes the connection.
+A small FastAPI + [APScheduler](https://apscheduler.readthedocs.io/) service that holds the
+home's people and what the house does for them: tasks scheduled to run later — one-shot
+("turn off the AC in 1 hour") or recurring ("every weekday at 8am") — and the Home Assistant
+notifications that reach each person. The agent knows a person only by their id; this
+service maps that id to their name, HA login, devices and allowed MCP servers.
 
 ## How it fits together
 
 ```
-agent worker ──REST (create/list/cancel)──► scheduler ──notify service──► Home Assistant
-                                             (SQLite)  ──POST /chat────► agent worker
+agent worker ──REST (tasks, users)──► ha-notify-scheduler ──notify service──► Home Assistant
+                                          (SQLite)        ──POST /chat────► agent worker
 ```
 
 - The worker exposes `schedule_task` / `list_scheduled_tasks` / `cancel_scheduled_task` /
@@ -39,6 +41,9 @@ A task's `execution` holds exactly one of:
 | `GET` | `/tasks/{id}` | One task + its run history. |
 | `PATCH` | `/tasks/{id}` | Modify time / execution / enabled. |
 | `DELETE` | `/tasks/{id}` | Cancel a task. |
+| `GET` / `PUT` | `/settings` | The people and the default notify channels (the card's Settings tab). |
+| `GET` | `/users/{id}` | One person's settings. |
+| `GET` | `/users/resolve?ha_user_id=` | The id of the person linked to an HA login. |
 | `GET` | `/healthz` | Liveness. |
 
 ## Config (env, shared `.env`)
@@ -56,7 +61,7 @@ A task's `execution` holds exactly one of:
 ## Develop
 
 ```bash
-cd scheduler
+cd ha-notify-scheduler
 uv sync
 uv run uvicorn main:app --reload --port 8080
 uv run pytest

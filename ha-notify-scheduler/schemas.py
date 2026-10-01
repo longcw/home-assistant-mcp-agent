@@ -95,9 +95,11 @@ class TaskOut(BaseModel):
 
 
 class UserSettings(BaseModel):
-    """One person: the name their Shortcut sends, an optional HA login, their devices,
-    and what they may use."""
+    """One person: their id, which every service and the agent know them by, a display
+    name, an optional HA login, their devices, and what they may use."""
 
+    # fixed once set; defaults to the casefolded name, which is what older records used
+    id: str = ""
     name: str
     ha_user_id: Optional[str] = None
     notify_targets: list[str] = Field(default_factory=list)
@@ -110,6 +112,11 @@ class UserSettings(BaseModel):
         if not v.strip():
             raise ValueError("user name is empty")
         return v.strip()
+
+    @model_validator(mode="after")
+    def _default_id(self) -> "UserSettings":
+        self.id = (self.id or self.name).strip().casefold()
+        return self
 
 
 class SettingsOut(BaseModel):
@@ -126,7 +133,7 @@ class SettingsUpdate(BaseModel):
     @field_validator("users")
     @classmethod
     def _unique(cls, v: Optional[list[UserSettings]]) -> Optional[list[UserSettings]]:
-        names = [u.name.casefold() for u in v or []]
-        if len(names) != len(set(names)):
-            raise ValueError("user names must be unique")
+        ids = [u.id for u in v or []]
+        if len(ids) != len(set(ids)):
+            raise ValueError("user ids must be unique")
         return v

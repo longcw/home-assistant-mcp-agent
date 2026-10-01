@@ -305,6 +305,22 @@ def test_settings_users(tmp_path):
         SettingsUpdate(users=[alice, UserSettings(name="alice")])
 
 
+def test_user_ids(tmp_path):
+    svc = make_service(tmp_path)
+    # an older record has no id, and gets its casefolded name
+    svc.update_settings(
+        SettingsUpdate(users=[UserSettings(name="Alice", ha_user_id="ha1")])
+    )
+    assert svc.user("alice").name == "Alice"
+    assert svc.owner(None, "ha1") == "alice"
+    # a set id stays when the name changes
+    svc.update_settings(
+        SettingsUpdate(users=[UserSettings(id="alice", name="Ally", ha_user_id="ha1")])
+    )
+    assert svc.user("alice").name == "Ally"
+    assert svc.user("ally") is None and svc.user(None) is None
+
+
 def test_adds_columns_to_an_old_database(tmp_path):
     import sqlite3
 

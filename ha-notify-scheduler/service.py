@@ -23,7 +23,15 @@ from sqlalchemy.orm import sessionmaker
 import runner
 from config import Config
 from models import Run, Settings, Task
-from schemas import RunOut, SettingsOut, SettingsUpdate, TaskCreate, TaskOut, TaskUpdate
+from schemas import (
+    RunOut,
+    SettingsOut,
+    SettingsUpdate,
+    TaskCreate,
+    TaskOut,
+    TaskUpdate,
+    UserSettings,
+)
 
 logger = logging.getLogger("scheduler.service")
 
@@ -63,18 +71,22 @@ class SchedulerService:
     # --- public CRUD ---------------------------------------------------------------
 
     def owner(self, user: str | None, ha_user_id: str | None) -> str | None:
-        """The person a request acts for, as a casefolded name; None for no one.
+        """The id of the person a request acts for; None for no one.
 
-        A typed name is taken as given; an HA login counts only when a person in the
-        settings is linked to it.
+        A given id is taken as is, even one the settings do not list; an HA login counts
+        only when a person in the settings is linked to it.
         """
         if user and user.strip():
             return user.strip().casefold()
         if ha_user_id:
             for person in self.get_settings().users:
                 if person.ha_user_id == ha_user_id:
-                    return person.name.casefold()
+                    return person.id
         return None
+
+    def user(self, user_id: str | None) -> UserSettings | None:
+        """The settings of the person with this id; None for no one or someone unlisted."""
+        return next((p for p in self.get_settings().users if p.id == user_id), None)
 
     def create_task(self, req: TaskCreate, owner: str | None = None) -> TaskOut:
         run_at_iso, cron = self._validate_schedule(req.schedule)
@@ -208,8 +220,7 @@ class SchedulerService:
             s.commit()
 
         # a person's notification channels; HA's own for anyone else
-        people = {p.name.casefold(): p for p in self.get_settings().users}
-        person = people.get(user) if user else None
+        person = self.user(user)
         targets = person.notify_targets if person else ["persistent_notification"]
         logger.info("running task %s (run %s): %s", task_id, run_id, description)
         status, result = await runner.run(self.cfg, description, execution, user, targets)

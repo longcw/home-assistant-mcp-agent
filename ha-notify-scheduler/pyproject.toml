@@ -1,7 +1,7 @@
 [project]
-name = "ha-agent-scheduler"
+name = "ha-notify-scheduler"
 version = "0.1.0"
-description = "Task scheduler for the Home Assistant voice agent"
+description = "People, scheduled tasks and notifications for the Home Assistant voice agent"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.110",

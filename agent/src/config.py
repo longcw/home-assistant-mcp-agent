@@ -92,7 +92,7 @@ def load_settings() -> Settings:
         agent_name=os.getenv("AGENT_NAME", "ha-agent"),
         prompt_file=os.getenv("PROMPT_FILE", os.path.join(_AGENT_ROOT, "prompt.yaml")),
         stt_idle_timeout=float(os.getenv("STT_IDLE_TIMEOUT", "120")),
-        scheduler_url=os.getenv("SCHEDULER_URL", "http://scheduler:8080"),
+        scheduler_url=os.getenv("SCHEDULER_URL", "http://ha-notify-scheduler:8080"),
         scheduler_token=os.getenv("SCHEDULER_TOKEN", ""),
         agent_tz=os.getenv("AGENT_TZ") or os.getenv("TZ") or "UTC",
         ha_url=os.getenv("HA_URL", ""),

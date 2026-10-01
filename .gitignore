@@ -178,8 +178,8 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-# Scheduler SQLite DB (bind-mounted from docker-compose; see scheduler/data)
-scheduler/data/
+# ha-notify-scheduler SQLite DB (bind-mounted from docker-compose)
+ha-notify-scheduler/data/
 
 # persisted text conversations
 agent-data/
