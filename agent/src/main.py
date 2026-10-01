@@ -37,7 +37,7 @@ server = AgentServer(port=settings.http_port, store=conversations.store)
 
 if settings.text_api_token:
     # these routes act for a person or reveal the setup, so they need the token
-    _GUARDED = (f"/{A2A_ENDPOINT}", text_chat.routes.CHAT_PATH, "/servers")
+    _GUARDED = (f"/{A2A_ENDPOINT}", text_chat.routes.CHAT_PATH, "/mcp")
 
     @server.http.middleware("http")
     async def require_token(request: Request, call_next):
@@ -49,7 +49,7 @@ if settings.text_api_token:
         return await call_next(request)
 
     # before the text chat's routes: its A2A binding shadows GET routes added after it
-    @server.http.get("/servers")
+    @server.http.get("/mcp/servers")
     async def restricted_servers() -> JSONResponse:
         """The MCP servers a person gets only when their Settings entry lists them."""
         return JSONResponse({"servers": mcp_clients.restricted()})
