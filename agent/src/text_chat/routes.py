@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import logging
 from typing import Any
@@ -43,14 +42,6 @@ def mount(server: AgentServer) -> None:
     if not token:
         logger.warning("TEXT_API_TOKEN is not set, so the text chat endpoints are off")
         return
-
-    @server.http.middleware("http")
-    async def require_token(request: Request, call_next):
-        if request.url.path.startswith((f"/{A2A_ENDPOINT}", CHAT_PATH)):
-            given = request.headers.get("authorization", "").removeprefix("Bearer ")
-            if not hmac.compare_digest(given.encode(), token.encode()):
-                return PlainTextResponse("unauthorized", status_code=401)
-        return await call_next(request)
 
     chats: dict[str | None, TextChat] = {}
 

@@ -163,12 +163,16 @@ class Guarded(mcp.MCPToolset):
 _PER_PERSON = {"mem0": PersonalMemory}
 
 
-def _toolset(entry: dict[str, Any], user_id: str | None) -> Toolset | None:
-    server_id = entry["id"]
+def _url(entry: dict[str, Any]) -> str | None:
+    """The entry's endpoint; None when it is not configured, so it is skipped."""
     if any(not os.getenv(var) for var in entry.get("requires") or []):
         return None
-    url = _expand(entry["url"])
-    if not url:
+    return _expand(entry["url"]) or None
+
+
+def _toolset(entry: dict[str, Any], user_id: str | None) -> Toolset | None:
+    server_id = entry["id"]
+    if not (url := _url(entry)):
         return None
     restricted = bool(entry.get("restricted"))
     if restricted and user_id is None:
@@ -215,11 +219,24 @@ def _toolset(entry: dict[str, Any], user_id: str | None) -> Toolset | None:
     return mcp.MCPToolset(**kwargs)
 
 
-def toolsets(user_id: str | None) -> list[Toolset]:
-    """The configured servers this session gets; none without a config file."""
+def _entries() -> list[dict[str, Any]]:
     path = Path(settings.mcp_config)
     if not path.exists():
         return []
-    entries = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("servers")
-    found = [_toolset(entry, user_id) for entry in entries or []]
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return data.get("servers") or []
+
+
+def toolsets(user_id: str | None) -> list[Toolset]:
+    """The configured servers this session gets; none without a config file."""
+    found = [_toolset(entry, user_id) for entry in _entries()]
     return [t for t in found if t is not None]
+
+
+def restricted() -> list[dict[str, str]]:
+    """The configured servers a person gets only when their settings list them."""
+    return [
+        {"id": entry["id"], "title": entry.get("title") or entry["id"]}
+        for entry in _entries()
+        if entry.get("restricted") and _url(entry)
+    ]

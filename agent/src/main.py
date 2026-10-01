@@ -1,7 +1,10 @@
 import asyncio
+import hmac
 import json
 import logging
 
+from fastapi import Request
+from fastapi.responses import JSONResponse, PlainTextResponse
 from livekit import api, rtc
 from livekit.agents import (
     AgentServer,
@@ -13,6 +16,7 @@ from livekit.agents import (
     inference,
 )
 
+import mcp_clients
 import text_chat.routes
 from agent import HomeAssistantAgent
 from config import (
@@ -22,7 +26,7 @@ from config import (
     TOOL_CALL_TOPIC,
     settings,
 )
-from conversations import conversations
+from conversations import A2A_ENDPOINT, conversations
 from utils import build_llm, parse_job_metadata, truncate
 
 logger = logging.getLogger("ha-mcp-agent")
@@ -30,6 +34,27 @@ logger = logging.getLogger("ha-mcp-agent")
 
 # the store holds the conversations; voice sessions do not join one yet
 server = AgentServer(port=settings.http_port, store=conversations.store)
+
+if settings.text_api_token:
+    # these routes act for a person or reveal the setup, so they need the token
+    _GUARDED = (f"/{A2A_ENDPOINT}", text_chat.routes.CHAT_PATH, "/servers")
+
+    @server.http.middleware("http")
+    async def require_token(request: Request, call_next):
+        if request.url.path.startswith(_GUARDED):
+            given = request.headers.get("authorization", "").removeprefix("Bearer ")
+            token = settings.text_api_token
+            if not hmac.compare_digest(given.encode(), token.encode()):
+                return PlainTextResponse("unauthorized", status_code=401)
+        return await call_next(request)
+
+    # before the text chat's routes: its A2A binding shadows GET routes added after it
+    @server.http.get("/servers")
+    async def restricted_servers() -> JSONResponse:
+        """The MCP servers a person gets only when their Settings entry lists them."""
+        return JSONResponse({"servers": mcp_clients.restricted()})
+
+
 text_chat.routes.mount(server)
 
 

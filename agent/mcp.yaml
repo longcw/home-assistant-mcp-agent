@@ -8,6 +8,7 @@
 # entry:
 #   id               the toolset's name, and what a person's Settings entry lists for a
 #                    restricted server
+#   title            how the Settings tab names a restricted server (default: the id)
 #   url              Streamable HTTP endpoint; an entry whose url comes out empty is skipped
 #   headers          sent on every request; a header whose variable is unset is left out
 #   requires         variables that must be set, or the entry is skipped
@@ -46,6 +47,7 @@ servers:
   # running herdr (https://github.com/longcw/herdr-mcp-server). They can run code there,
   # so only people whose Settings entry lists "herdr" get it.
   - id: herdr
+    title: Coding agents (herdr)
     url: ${HERDR_MCP_URL}
     requires: [HERDR_MCP_URL]
     # a tool that sends work waits up to the server's 60 s watch window
