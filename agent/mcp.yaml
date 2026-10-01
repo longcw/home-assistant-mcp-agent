@@ -43,6 +43,16 @@ servers:
     allowed_tools: [add_memory, search_memories, get_memories, update_memory, delete_memory]
     per_person: mem0
 
+  # music-mcp-server: Apple Music on a Mac and its AirPlay speakers, with presets from
+  # a Shortcuts folder.
+  - id: music
+    title: Music
+    url: ${MUSIC_MCP_URL}
+    requires: [MUSIC_MCP_URL]
+    # starting a catalog album takes about 15 s
+    timeout: 45
+    report_progress: [play_music]
+
   # herdr-mcp-server: start, check and prompt coding agents (Claude Code) on a computer
   # running herdr (https://github.com/longcw/herdr-mcp-server). They can run code there,
   # so only people whose Settings entry lists "herdr" get it.
