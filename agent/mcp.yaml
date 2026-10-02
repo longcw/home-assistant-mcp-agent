@@ -53,6 +53,15 @@ servers:
     timeout: 45
     report_progress: [play_music]
 
+  # baby-mcp-server: log a baby's diapers, feeds and sleep in the Baby Tracker app on a Mac,
+  # through a Shortcuts folder.
+  - id: baby
+    title: Baby log
+    url: ${BABY_MCP_URL}
+    requires: [BABY_MCP_URL]
+    # each entry runs a shortcut, about 8 s
+    timeout: 45
+
   # herdr-mcp-server: start, check and prompt coding agents (Claude Code) on a computer
   # running herdr (https://github.com/longcw/herdr-mcp-server). They can run code there,
   # so only people whose Settings entry lists "herdr" get it.
