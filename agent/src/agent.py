@@ -44,6 +44,17 @@ def load_instructions() -> str:
     return instructions.strip()
 
 
+class _HAServer(mcp.MCPServerHTTP):
+    """HA's MCP server without the tools listed in HA_HIDDEN_TOOLS."""
+
+    async def list_tools(self, **kwargs):
+        return [
+            t
+            for t in await super().list_tools(**kwargs)
+            if t.id not in settings.ha_hidden_tools
+        ]
+
+
 class HomeAssistantAgent(Agent):
     """A LiveKit agent that controls Home Assistant via its native MCP server.
 
@@ -57,7 +68,7 @@ class HomeAssistantAgent(Agent):
         tools: list[Tool | Toolset] = [
             mcp.MCPToolset(
                 id="home-assistant",
-                mcp_server=mcp.MCPServerHTTP(
+                mcp_server=_HAServer(
                     url=ha.mcp_url(),
                     headers={"Authorization": f"Bearer {settings.ha_token}"},
                     tool_result_resolver=ha.text_result_resolver,

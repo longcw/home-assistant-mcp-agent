@@ -49,6 +49,9 @@ class Settings:
     # Home Assistant base URL and long-lived token.
     ha_url: str
     ha_token: str
+    # HA MCP tools the LLM never sees; the defaults need a voice satellite or repeat the
+    # time each turn already states
+    ha_hidden_tools: frozenset[str]
     # MCP servers beyond Home Assistant's (YAML `servers:`); a missing file adds none.
     mcp_config: str
     # this agent's HTTP app as MCP servers reach it, for their callbacks; empty = none.
@@ -89,6 +92,13 @@ def load_settings() -> Settings:
         agent_tz=os.getenv("AGENT_TZ") or os.getenv("TZ") or "UTC",
         ha_url=os.getenv("HA_URL", ""),
         ha_token=os.getenv("HA_TOKEN", ""),
+        ha_hidden_tools=frozenset(
+            name.strip()
+            for name in os.getenv(
+                "HA_HIDDEN_TOOLS", "GetDateTime,HassBroadcast,HassCancelAllTimers"
+            ).split(",")
+            if name.strip()
+        ),
         mcp_config=os.getenv("MCP_CONFIG", os.path.join(_AGENT_ROOT, "mcp.yaml")),
         callback_base_url=os.getenv("CALLBACK_BASE_URL", ""),
         http_port=int(os.getenv("HTTP_PORT", "8081")),

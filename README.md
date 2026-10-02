@@ -74,6 +74,7 @@ The agent calls `load_dotenv()`, which walks up to the repo-root `.env`.
 | --- | --- |
 | `HA_URL` | Home Assistant base URL. `/api/mcp` is appended automatically. |
 | `HA_TOKEN` | Home Assistant long-lived access token (sent as a bearer token). |
+| `HA_HIDDEN_TOOLS` | Comma-separated HA MCP tools to hide from the LLM, such as intents for devices the home lacks. Defaults to `GetDateTime,HassBroadcast,HassCancelAllTimers`. |
 | `PARALLEL_API_KEY` / `MEM0_API_KEY` / `HERDR_MCP_URL` | Keys and URLs of the optional MCP servers in `agent/mcp.yaml`; see [MCP servers](#mcp-servers). |
 | `CALLBACK_BASE_URL` | This agent's HTTP app as MCP servers reach it, e.g. `http://<agent-host>:8952`, for servers that report long tasks back. |
 | `AGENT_PROMPT` / `AGENT_MCP_CONFIG` | Your own copies of `agent/prompt.yaml` and `agent/mcp.yaml` for docker-compose to mount; `agent/*.local.yaml` is git-ignored. |
