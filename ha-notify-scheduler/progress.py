@@ -4,8 +4,11 @@ The agent posts each phase of a turn: ``start`` (the question), ``step`` (a tool
 ``report`` (a tool's progress report) and ``final`` (the answer, with the quick replies it
 offered). ``TEXT_LIVE_MODE`` picks how they show:
 
-- ``notification``: one notification titled with the question, under a fixed tag. The
-  question and the answer pop with sound, and each step is appended as a passive update.
+- ``notification``: one notification titled with the question, under a tag of its turn,
+  that pops with sound and takes each step as a passive update; the answer then pops as a
+  notification of its own. The phone applies a clear as it arrives but adds a notification
+  a moment later, so a step sent just before the answer can land after a clear and turn the
+  answer into a silent replacement of itself; no push shares the answer's tag.
 - ``activity``: each phase goes to the livekit_voice integration's progress API, which runs
   inside Home Assistant and can see whether the phone's Live Activity is running.
 
@@ -31,6 +34,7 @@ from schemas import ProgressEvent
 logger = logging.getLogger("scheduler.progress")
 
 TAG = "ha-text"
+CLEAR_DELAY = 1.0
 
 
 @dataclass
@@ -39,6 +43,8 @@ class _Shown:
 
     phone: str = ""
     question: str = ""
+    # the latest turn's notification tag; its answer goes under ``<tag>-answer``
+    tag: str = TAG
     steps: list[str] = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -75,7 +81,11 @@ class PhoneProgress:
         if self._activity:
             await self._phase(shown, "start", f"› {shown.question}", "…", "mdi:robot")
         else:
-            await self._notify(shown, ["…"], pop=True)
+            # a new tag pops by itself, with no clear that a late step could overtake
+            for tag in (shown.tag, f"{shown.tag}-answer"):
+                await ha.push(self.cfg, shown.phone, "clear_notification", {"tag": tag})
+            shown.tag = f"{TAG}-{uuid.uuid4().hex[:8]}"
+            await self._notify(shown, ["…"], shown.tag)
 
     async def _step(self, shown: _Shown, tool: str, args: Any) -> None:
         values = args.values() if isinstance(args, dict) else [args] if args else []
@@ -97,14 +107,15 @@ class PhoneProgress:
         if self._activity:
             await self._phase(shown, "progress", lines[-1], f"Step {len(shown.steps)}", icon)
         else:
-            await self._notify(shown, lines)
+            await self._notify(shown, lines, shown.tag, quiet=True)
 
     async def _report(self, shown: _Shown, text: str) -> None:
         if self._activity:
             status = f"Step {len(shown.steps)}"
             await self._phase(shown, "progress", f"… {text}", status, "mdi:progress-clock")
         else:
-            await self._notify(shown, [*(f"→ {s}" for s in shown.steps), f"  … {text}"])
+            lines = [*(f"→ {s}" for s in shown.steps), f"  … {text}"]
+            await self._notify(shown, lines, shown.tag, quiet=True)
 
     async def _final(self, shown: _Shown, event: ProgressEvent) -> None:
         answer = event.text or "Done."
@@ -142,7 +153,10 @@ class PhoneProgress:
                 clear_after=self.cfg.live_clear_after,
             )
         else:
-            await self._notify(shown, [answer], pop=True, actions=actions)
+            await self._notify(shown, [answer], f"{shown.tag}-answer", actions=actions)
+            # a clear overtakes a step still being added, so it waits for the last ones
+            await asyncio.sleep(CLEAR_DELAY)
+            await ha.push(self.cfg, shown.phone, "clear_notification", {"tag": shown.tag})
 
     @property
     def _activity(self) -> bool:
@@ -168,19 +182,17 @@ class PhoneProgress:
         self,
         shown: _Shown,
         lines: list[str],
+        tag: str,
         *,
-        pop: bool = False,
+        quiet: bool = False,
         actions: list[dict[str, Any]] | None = None,
     ) -> None:
-        data: dict[str, Any] = {"tag": TAG}
+        data: dict[str, Any] = {"tag": tag}
         if self.cfg.live_url:
             data["url"] = self.cfg.live_url
         if actions:
             data["actions"] = actions
-        if pop:
-            # a replacement under one tag updates silently, so clear it to pop again
-            await ha.push(self.cfg, shown.phone, "clear_notification", {"tag": TAG})
-        else:
+        if quiet:
             # appended to the question's notification, or, once that is gone, delivered
             # without a banner or a sound
             data["push"] = {"interruption-level": "passive", "sound": "none"}
