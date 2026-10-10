@@ -17,6 +17,8 @@ services:
       # agent/prompt.local.yaml with rules for your home.
       - ${AGENT_PROMPT:-./agent/prompt.yaml}:/app/prompt.yaml:ro
       - ${AGENT_MCP_CONFIG:-./agent/mcp.yaml}:/app/mcp.yaml:ro
+      # Slash commands for the text chat, re-read per command; *.local.md files are untracked.
+      - ./agent/commands:/app/commands:ro
       # Persisted text conversations (one SQLite file each) and the current one's id.
       - ./agent-data:/data
     ports:
