@@ -53,20 +53,55 @@ def _expand(value: str) -> str | None:
 _MEMORY_SCOPE = ("user_id", "agent_id", "app_id", "run_id")
 
 
-class PersonalMemory(mcp.MCPToolset):
-    """Mem0's tools pinned to one person, so no one reaches another's memories."""
+class _Pinned(mcp.MCPToolset):
+    """A server whose tools get arguments about the person speaking from the agent."""
 
-    def __init__(self, *, user_id: str, **kwargs: Any) -> None:
+    def __init__(self, *, user_id: str | None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._user_id = user_id
         self._pinned: Any = None
 
-    async def setup(self, *, reload: bool = False) -> PersonalMemory:
+    async def setup(self, *, reload: bool = False) -> _Pinned:
         await super().setup(reload=reload)
         # setup() is a no-op once connected; re-pin only a freshly fetched tool list
         if self._tools is not self._pinned:
             self._tools = self._pinned = [self._pin(t) for t in self._tools]
         return self
+
+    def _pin(self, tool: Any) -> Any:
+        raise NotImplementedError
+
+
+class HomeAssistantTools(_Pinned):
+    """HA's tools, with a script's `caller` field set to the id of the person speaking.
+
+    A script that reports back later, e.g. once hot water is ready, sends that id in an
+    `agent_update` event, which the scheduler forwards into the person's conversation.
+    """
+
+    def _pin(self, tool: Any) -> Any:
+        if not isinstance(tool, RawFunctionTool):
+            return tool
+        schema = copy.deepcopy(tool.info.raw_schema)
+        params = schema["parameters"]
+        props = params.get("properties", {})
+        if props.pop("caller", None) is None:
+            return tool
+        if "required" in params:
+            params["required"] = [r for r in params["required"] if r in props]
+        user_id = self._user_id
+
+        async def call(raw_arguments: dict[str, Any]) -> Any:
+            args = {k: v for k, v in raw_arguments.items() if k != "caller"}
+            if user_id:
+                args["caller"] = user_id
+            return await tool(args)
+
+        return function_tool(call, raw_schema=schema, flags=tool.info.flags)
+
+
+class PersonalMemory(_Pinned):
+    """Mem0's tools pinned to one person, so no one reaches another's memories."""
 
     def _pin(self, tool: Any) -> Any:
         if not isinstance(tool, RawFunctionTool):

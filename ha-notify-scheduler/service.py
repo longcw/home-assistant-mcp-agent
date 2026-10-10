@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
@@ -63,7 +64,7 @@ class SchedulerService:
         default_tz = ZoneInfo(cfg.default_tz) if cfg.default_tz else timezone.utc
         self.scheduler = AsyncIOScheduler(timezone=default_tz)
         self.progress = PhoneProgress(cfg, self.phone)
-        self._listener: asyncio.Task[None] | None = None
+        self._listeners: list[asyncio.Task[None]] = []
 
     # --- lifecycle -----------------------------------------------------------------
 
@@ -71,12 +72,35 @@ class SchedulerService:
         self.scheduler.start()
         self._rehydrate()
         if self.cfg.ha_url and self.cfg.chat_token:
-            self._listener = asyncio.create_task(self.progress.listen())
+            self._listeners = [
+                asyncio.create_task(self.progress.listen()),
+                asyncio.create_task(self._forward_updates()),
+            ]
 
     async def stop(self) -> None:
         self.scheduler.shutdown(wait=False)
-        if self._listener is not None:
-            self._listener.cancel()
+        for listener in self._listeners:
+            listener.cancel()
+
+    async def _forward_updates(self) -> None:
+        """Send HA's `agent_update` events, `{user, source, text}`, into the person's
+        conversation as an update the agent relays, e.g. a script reporting back later."""
+        async for event in ha.subscribe(self.cfg, "agent_update"):
+            user, text = event.get("user"), str(event.get("text") or "").strip()
+            if not user or not text:
+                continue
+            logger.info("update for %s from HA: %s", user, text[:120])
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.post(
+                        f"{self.cfg.chat_url}/events",
+                        params={"user": user},
+                        headers={"Authorization": f"Bearer {self.cfg.chat_token}"},
+                        json={"source": event.get("source") or "Home Assistant", "text": text},
+                    )
+                    resp.raise_for_status()
+            except Exception:  # noqa: BLE001 - one lost update leaves the listener running
+                logger.exception("failed to forward an update from HA")
 
     # --- public CRUD ---------------------------------------------------------------
 

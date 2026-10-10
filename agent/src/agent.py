@@ -66,13 +66,14 @@ class HomeAssistantAgent(Agent):
 
     def __init__(self, user_id: str | None = None) -> None:
         tools: list[Tool | Toolset] = [
-            mcp.MCPToolset(
+            mcp_clients.HomeAssistantTools(
                 id="home-assistant",
                 mcp_server=_HAServer(
                     url=ha.mcp_url(),
                     headers={"Authorization": f"Bearer {settings.ha_token}"},
                     tool_result_resolver=ha.text_result_resolver,
                 ),
+                user_id=user_id,
             ),
             *mcp_clients.toolsets(user_id),
         ]
