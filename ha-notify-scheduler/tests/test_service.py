@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 import ha
+import progress
 import service as service_module
 from config import Config
 from db import make_engine, make_session_factory
@@ -278,6 +279,7 @@ async def test_progress_on_the_phone_and_a_tapped_reply(tmp_path, monkeypatch):
         SettingsUpdate(users=[UserSettings(name="Alice", notify_targets=["mobile_app_a"])])
     )
     requests = mock_http(monkeypatch, lambda _: httpx.Response(200, json=[]))
+    monkeypatch.setattr(progress, "CLEAR_DELAY", 0)
     for event in (
         ProgressEvent(user="alice", phase="start", text="AC off?"),
         ProgressEvent(user="alice", phase="step", tool="HassTurnOff", args={"name": "AC"}),
@@ -287,13 +289,21 @@ async def test_progress_on_the_phone_and_a_tapped_reply(tmp_path, monkeypatch):
     sent = [json.loads(r.content) for r in requests]
     assert [s["message"] for s in sent] == [
         "clear_notification",
+        "clear_notification",
         "…",
         "→ HassTurnOff · AC",
-        "clear_notification",
         "Off.",
+        "clear_notification",
     ]
-    assert sent[2]["title"] == "AC off?"
+    # the turn has a tag of its own, and its answer another, so no late push replaces it
+    tag = sent[2]["data"]["tag"]
+    assert tag.startswith("ha-text-") and sent[3]["data"]["tag"] == tag
+    assert sent[4]["data"]["tag"] == f"{tag}-answer" and sent[5]["data"]["tag"] == tag
+    assert sent[3]["title"] == "AC off?"
+    # only the answer sounds
     assert sent[2]["data"]["push"]["interruption-level"] == "passive"
+    assert sent[3]["data"]["push"]["interruption-level"] == "passive"
+    assert "push" not in sent[4]["data"]
     buttons = sent[4]["data"]["actions"]
     assert [b["title"] for b in buttons] == ["Thanks", "Reply"]
     # no one in particular has no phone here, so nothing shows
