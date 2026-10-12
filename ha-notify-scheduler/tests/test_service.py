@@ -300,6 +300,8 @@ async def test_progress_on_the_phone_and_a_tapped_reply(tmp_path, monkeypatch):
     assert tag.startswith("ha-text-") and sent[3]["data"]["tag"] == tag
     assert sent[4]["data"]["tag"] == f"{tag}-answer" and sent[5]["data"]["tag"] == tag
     assert sent[3]["title"] == "AC off?"
+    # only the answer sounds
+    assert sent[2]["data"]["push"]["interruption-level"] == "passive"
     assert sent[3]["data"]["push"]["interruption-level"] == "passive"
     assert "push" not in sent[4]["data"]
     buttons = sent[4]["data"]["actions"]

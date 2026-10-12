@@ -5,8 +5,8 @@ The agent posts each phase of a turn: ``start`` (the question), ``step`` (a tool
 offered). ``TEXT_LIVE_MODE`` picks how they show:
 
 - ``notification``: one notification titled with the question, under a tag of its turn,
-  that pops with sound and takes each step as a passive update; the answer then pops as a
-  notification of its own. The phone applies a clear as it arrives but adds a notification
+  that arrives quietly and takes each step as a passive update; only the answer pops with
+  sound, as a notification of its own. The phone applies a clear as it arrives but adds a notification
   a moment later, so a step sent just before the answer can land after a clear and turn the
   answer into a silent replacement of itself; no push shares the answer's tag.
 - ``activity``: each phase goes to the livekit_voice integration's progress API, which runs
@@ -81,11 +81,11 @@ class PhoneProgress:
         if self._activity:
             await self._phase(shown, "start", f"› {shown.question}", "…", "mdi:robot")
         else:
-            # a new tag pops by itself, with no clear that a late step could overtake
+            # a new tag per turn, with no clear that a late step could overtake
             for tag in (shown.tag, f"{shown.tag}-answer"):
                 await ha.push(self.cfg, shown.phone, "clear_notification", {"tag": tag})
             shown.tag = f"{TAG}-{uuid.uuid4().hex[:8]}"
-            await self._notify(shown, ["…"], shown.tag)
+            await self._notify(shown, ["…"], shown.tag, quiet=True)
 
     async def _step(self, shown: _Shown, tool: str, args: Any) -> None:
         values = args.values() if isinstance(args, dict) else [args] if args else []
