@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from commands import COMMAND_KEY
 from config import UPDATE_PREFIX
 from utils import parse_arguments
 
@@ -31,10 +32,10 @@ def render(
         elif item.type == "message" and item.role in ("user", "assistant"):
             if text:
                 role = "user" if item.role == "user" else "agent"
-                shown.append(
-                    {"kind": "message", "id": item.id, "role": role, "text": text}
-                    | {"ts": ts}
-                )
+                row = {"kind": "message", "id": item.id, "role": role, "text": text}
+                if command := item.extra.get(COMMAND_KEY):
+                    row["command"] = command
+                shown.append(row | {"ts": ts})
                 if role == "user":
                     suggestions = []
         elif item.type == "function_call":

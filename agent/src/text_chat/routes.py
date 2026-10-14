@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from livekit.agents import AgentServer, AgentSession
 from livekit.agents.a2a import A2ASessionContext
 
+import commands
 from agent import HomeAssistantAgent
 from config import UPDATE_PREFIX, settings
 from conversations import A2A_ENDPOINT, conversations
@@ -78,6 +79,11 @@ def mount(server: AgentServer) -> None:
         if not text and not renew:
             return PlainTextResponse("no text given", status_code=400)
         person = chat_of(data.get("user") or query.get("user"))
+        if not renew and (command := commands.parse(text)) is not None:
+            # answered with its reply even without `wait`: a command takes seconds
+            conversation_id, reply = await person.command(command, text)
+            headers = {"X-Conversation-Id": conversation_id}
+            return PlainTextResponse(reply, headers=headers)
         try:
             conversation_id, reply = await person.send(
                 text,
@@ -93,6 +99,22 @@ def mount(server: AgentServer) -> None:
             reply,
             status_code=200 if wait or not text else 202,
             headers={"X-Conversation-Id": conversation_id},
+        )
+
+    @server.http.get(f"{CHAT_PATH}/commands")
+    async def chat_commands() -> JSONResponse:
+        """The slash commands a message can start with, for a UI to offer."""
+        return JSONResponse(
+            {
+                "commands": [
+                    {
+                        "name": c.name,
+                        "description": c.description,
+                        "argument_hint": c.argument_hint,
+                    }
+                    for c in commands.load().values()
+                ]
+            }
         )
 
     @server.http.get(f"{CHAT_PATH}/history")

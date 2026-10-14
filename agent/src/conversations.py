@@ -19,6 +19,7 @@ from typing import Any
 from urllib.parse import unquote
 
 from livekit.agents import Agent, AgentSession, SessionUsageUpdatedEvent
+from livekit.agents.llm import ChatItem
 from livekit.agents.metrics import LLMModelUsage
 from livekit.agents.store import LocalStore, StoredSession, StoreError
 
@@ -173,6 +174,17 @@ class Conversations:
             self.set_usage(conversation_id, usage)
 
         session.on("session_usage_updated", on_usage)
+
+    async def add(self, conversation_id: str, items: list[ChatItem]) -> None:
+        """Add items made outside a turn to a loaded conversation: to the history the
+        person sees and to the context the agent reads, then save."""
+        session = self.live[conversation_id]
+        session.history.insert(items)
+        agent = session.current_agent
+        chat_ctx = agent.chat_ctx.copy()
+        chat_ctx.insert(items)
+        await agent.update_chat_ctx(chat_ctx)
+        await session.save()
 
     async def items(self, conversation_id: str) -> list:
         """A conversation's chat items, from its loaded session or else the store."""

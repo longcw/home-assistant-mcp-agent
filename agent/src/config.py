@@ -70,6 +70,11 @@ class Settings:
     text_max_items: int
     # Seconds a waiting /chat request waits for its reply, under the proxy's 90 s.
     text_reply_timeout: float
+    # Directory of the text chat's slash commands, one skill-shaped markdown file each.
+    commands_dir: str
+    # llm_extra_body for a command's single call with no tools, where thinking is safe;
+    # None keeps llm_extra_body.
+    commands_llm_extra_body: dict[str, Any] | None
 
 
 def load_settings() -> Settings:
@@ -108,6 +113,10 @@ def load_settings() -> Settings:
         text_renew_after=float(os.getenv("TEXT_RENEW_AFTER", "0")),
         text_max_items=int(os.getenv("TEXT_MAX_ITEMS", "100")),
         text_reply_timeout=float(os.getenv("TEXT_REPLY_TIMEOUT", "80")),
+        commands_dir=os.getenv("COMMANDS_DIR", os.path.join(_AGENT_ROOT, "commands")),
+        commands_llm_extra_body=(
+            json.loads(raw) if (raw := os.getenv("COMMANDS_LLM_EXTRA_BODY")) else None
+        ),
     )
 
 
