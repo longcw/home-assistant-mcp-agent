@@ -69,15 +69,9 @@ servers:
     title: Coding agents (herdr)
     url: ${HERDR_MCP_URL}
     requires: [HERDR_MCP_URL]
-    # a tool that sends work waits up to the server's 60 s watch window
-    timeout: 90
-    report_progress:
-      - start_herdr_agent
-      - watch_herdr_agent
-      - prompt_herdr_agent
-      - answer_herdr_permission
-      - resume_herdr_agent
+    # starting a session waits for Claude Code to come up, then returns; the person
+    # follows it in herdr
+    timeout: 60
     restricted: true
-    # the model tends to ask and act in one turn; these wait for the person's answer
-    confirm: [start_herdr_agent, answer_herdr_permission]
-    callback: true
+    # the model tends to ask and act in one turn; starting waits for the person's answer
+    confirm: [start_herdr_agent]
