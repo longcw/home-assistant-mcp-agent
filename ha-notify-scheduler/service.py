@@ -26,8 +26,11 @@ import ha
 import runner
 from config import Config
 from progress import PhoneProgress
-from models import Run, Settings, Task
+from models import Memory, Run, Settings, Task
 from schemas import (
+    MemoryCreate,
+    MemoryOut,
+    MemoryUpdate,
     NotifyRequest,
     RunOut,
     SettingsOut,
@@ -55,6 +58,16 @@ def _utcnow_iso() -> str:
 
 def _new_id() -> str:
     return uuid.uuid4().hex
+
+
+def _memory_out(m: Memory) -> MemoryOut:
+    return MemoryOut(
+        id=m.id,
+        text=m.text,
+        shared=m.user is None,
+        created_at=m.created_at,
+        updated_at=m.updated_at,
+    )
 
 
 class SchedulerService:
@@ -226,6 +239,61 @@ class SchedulerService:
             s.commit()
         self._remove_job(task_id)
         return out
+
+    # --- memories ------------------------------------------------------------------
+
+    def list_memories(self, owner: str | None = None) -> list[MemoryOut]:
+        """The household's memories and the person's own, oldest first."""
+        with self._Session() as s:
+            mine = Memory.user.is_(None)
+            if owner:
+                mine |= Memory.user == owner
+            rows = s.scalars(select(Memory).where(mine).order_by(Memory.id))
+            return [_memory_out(m) for m in rows]
+
+    def create_memory(self, req: MemoryCreate, owner: str | None = None) -> MemoryOut:
+        if not req.shared and not owner:
+            raise ValueError("no person to keep a personal memory for; make it shared")
+        now = _utcnow_iso()
+        with self._Session() as s:
+            m = Memory(
+                user=None if req.shared else owner,
+                text=req.text,
+                created_at=now,
+                updated_at=now,
+            )
+            s.add(m)
+            s.commit()
+            return _memory_out(m)
+
+    def update_memory(
+        self, memory_id: int, req: MemoryUpdate, owner: str | None = None
+    ) -> MemoryOut | None:
+        with self._Session() as s:
+            m = s.get(Memory, memory_id)
+            if m is None or m.user not in (None, owner):
+                return None
+            if req.shared is not None:
+                if not req.shared and not owner:
+                    raise ValueError("no person to keep a personal memory for")
+                m.user = None if req.shared else owner
+            if req.text is not None:
+                m.text = req.text
+            m.updated_at = _utcnow_iso()
+            s.commit()
+            return _memory_out(m)
+
+    def delete_memory(
+        self, memory_id: int, owner: str | None = None
+    ) -> MemoryOut | None:
+        with self._Session() as s:
+            m = s.get(Memory, memory_id)
+            if m is None or m.user not in (None, owner):
+                return None
+            out = _memory_out(m)
+            s.delete(m)
+            s.commit()
+            return out
 
     # --- settings ------------------------------------------------------------------
 

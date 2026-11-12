@@ -1,8 +1,8 @@
 """Async REST client for ha-notify-scheduler, which knows each person behind a user id.
 
-The agent knows a person only by that id: the scheduling tools call the task CRUD with
-it, and notifications, a text turn's progress and a person's allowed MCP servers go
-through the service by it.
+The agent knows a person only by that id: the scheduling and memory tools call the task
+and memory CRUD with it, and notifications, a text turn's progress and a person's
+allowed MCP servers go through the service by it.
 """
 
 from __future__ import annotations
@@ -71,6 +71,28 @@ class SchedulerClient:
 
     async def delete_task(self, task_id: str, user_id: str | None) -> Any:
         return await self._request("DELETE", f"/tasks/{task_id}", user_id=user_id)
+
+    async def memories(self, user_id: str | None) -> list[dict[str, Any]]:
+        """The household's memories and the person's own; empty when unreachable."""
+        try:
+            return await self._request("GET", "/memories", user_id=user_id) or []
+        except Exception:
+            logger.warning("could not read memories", exc_info=True)
+            return []
+
+    async def add_memory(self, text: str, shared: bool, user_id: str | None) -> Any:
+        body = {"text": text, "shared": shared}
+        return await self._request("POST", "/memories", body, user_id=user_id)
+
+    async def update_memory(
+        self, memory_id: int, payload: dict, user_id: str | None
+    ) -> Any:
+        return await self._request(
+            "PATCH", f"/memories/{memory_id}", payload, user_id=user_id
+        )
+
+    async def delete_memory(self, memory_id: int, user_id: str | None) -> Any:
+        return await self._request("DELETE", f"/memories/{memory_id}", user_id=user_id)
 
     async def notify(
         self, user_id: str | None, message: str, title: str | None = None

@@ -1,4 +1,4 @@
-"""The HomeAssistantAgent: HA MCP tools, live-state helpers, and scheduling tools."""
+"""The HomeAssistantAgent: HA MCP tools, live-state helpers, memory and scheduling."""
 
 import json
 import logging
@@ -28,8 +28,9 @@ from utils import current_time_text, to_aware_iso
 logger = logging.getLogger("ha-mcp-agent")
 
 
-def load_instructions() -> str:
-    """Read the agent's system prompt from the prompt file (YAML `instructions` key).
+def load_instructions(memories: list[dict[str, Any]]) -> str:
+    """Read the agent's system prompt from the prompt file (YAML `instructions` key) and
+    append the person's memories.
 
     Read fresh per session so editing the mounted prompt file applies to the next
     conversation without rebuilding the image.
@@ -41,7 +42,12 @@ def load_instructions() -> str:
         raise RuntimeError(
             f"no non-empty 'instructions' in prompt file {settings.prompt_file!r}"
         )
-    return instructions.strip()
+    # last, so a changed memory leaves the cached prompt prefix intact
+    lines = ["# Memories", "Yours (this user's own):"]
+    lines += [f"- [{m['id']}] {m['text']}" for m in memories if not m["shared"]]
+    lines.append("Household (shared by everyone):")
+    lines += [f"- [{m['id']}] {m['text']}" for m in memories if m["shared"]]
+    return instructions.strip() + "\n\n" + "\n".join(lines)
 
 
 class _HAServer(mcp.MCPServerHTTP):
@@ -64,7 +70,9 @@ class HomeAssistantAgent(Agent):
     tools defer actions to the scheduler service.
     """
 
-    def __init__(self, user_id: str | None = None) -> None:
+    def __init__(
+        self, user_id: str | None = None, memories: list[dict[str, Any]] = ()
+    ) -> None:
         tools: list[Tool | Toolset] = [
             mcp_clients.HomeAssistantTools(
                 id="home-assistant",
@@ -77,7 +85,7 @@ class HomeAssistantAgent(Agent):
             ),
             *mcp_clients.toolsets(user_id),
         ]
-        super().__init__(instructions=load_instructions(), tools=tools)
+        super().__init__(instructions=load_instructions(list(memories)), tools=tools)
         # the id of the person this session speaks for, or None for no one
         self.user_id = user_id
         self._devices: pd.DataFrame | None = None
@@ -188,6 +196,63 @@ class HomeAssistantAgent(Agent):
         logger.info("send_notification: %s", message)
         ok = await scheduler.notify(self.user_id, message, title)
         return "Notification sent." if ok else "Failed to send the notification."
+
+    # --- Memory tools ---
+    # The memories are in the instructions from the session's start, so there is no
+    # search; a change here shows in this session through the tool call itself.
+
+    @function_tool
+    async def remember(self, text: str, shared: bool = False) -> str:
+        """Remember something for every later conversation.
+
+        Args:
+            text: One self-contained fact or preference, in the user's language.
+            shared: True for something about the home that holds for everyone (what the
+                family calls a device or room), False for this user's own preference.
+        """
+        logger.info("remember: %s (shared=%s)", text, shared)
+        try:
+            m = await scheduler.add_memory(text, shared, self.user_id)
+        except Exception as exc:  # noqa: BLE001
+            raise ToolError(f"could not remember it: {exc}") from exc
+        return f"Remembered as [{m['id']}]."
+
+    @function_tool
+    async def update_memory(
+        self, memory_id: int, text: str | None = None, shared: bool | None = None
+    ) -> str:
+        """Change a memory's text, or whether the household shares it.
+
+        Args:
+            memory_id: The number in brackets before the memory.
+            text: The new text, replacing the old.
+            shared: True to share it with the household, False to keep it as the user's.
+        """
+        logger.info("update_memory: %s", memory_id)
+        payload = {
+            k: v for k, v in (("text", text), ("shared", shared)) if v is not None
+        }
+        if not payload:
+            raise ToolError("nothing to update.")
+        try:
+            m = await scheduler.update_memory(memory_id, payload, self.user_id)
+        except Exception as exc:  # noqa: BLE001
+            raise ToolError(f"could not update memory {memory_id}: {exc}") from exc
+        return f"Memory [{m['id']}] is now: {m['text']}"
+
+    @function_tool
+    async def forget(self, memory_id: int) -> str:
+        """Delete a memory.
+
+        Args:
+            memory_id: The number in brackets before the memory.
+        """
+        logger.info("forget: %s", memory_id)
+        try:
+            await scheduler.delete_memory(memory_id, self.user_id)
+        except Exception as exc:  # noqa: BLE001
+            raise ToolError(f"could not forget memory {memory_id}: {exc}") from exc
+        return f"Forgot [{memory_id}]."
 
     # --- Scheduling tools ---
     # These call the scheduler service. Their JSON results flow to the card over the

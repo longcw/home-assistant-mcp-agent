@@ -27,6 +27,7 @@ from config import (
     settings,
 )
 from conversations import A2A_ENDPOINT, conversations
+from scheduler_client import scheduler
 from utils import build_llm, parse_job_metadata, truncate
 
 logger = logging.getLogger("ha-mcp-agent")
@@ -109,7 +110,8 @@ async def entrypoint(ctx: JobContext) -> None:
     stt = inference.STT(settings.stt_model, language=settings.stt_language)
 
     # the integration names the person who asked for this session
-    agent = HomeAssistantAgent(user_id=meta.get("user_id") or None)
+    user_id = meta.get("user_id") or None
+    agent = HomeAssistantAgent(user_id, await scheduler.memories(user_id))
     session = AgentSession(
         stt=stt,
         llm=build_llm(),

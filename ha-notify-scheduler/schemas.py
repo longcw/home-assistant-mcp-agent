@@ -160,3 +160,39 @@ class SettingsUpdate(BaseModel):
         if len(ids) != len(set(ids)):
             raise ValueError("user ids must be unique")
         return v
+
+
+MAX_MEMORY_CHARS = 500
+
+
+class MemoryCreate(BaseModel):
+    text: str = Field(max_length=MAX_MEMORY_CHARS)
+    # the household's, shared by everyone, rather than the person's own
+    shared: bool = False
+
+    @field_validator("text")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("memory text is empty")
+        return v.strip()
+
+
+class MemoryUpdate(BaseModel):
+    text: Optional[str] = Field(default=None, max_length=MAX_MEMORY_CHARS)
+    shared: Optional[bool] = None
+
+    @field_validator("text")
+    @classmethod
+    def _strip(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not v.strip():
+            raise ValueError("memory text is empty")
+        return v.strip() if v is not None else None
+
+
+class MemoryOut(BaseModel):
+    id: int
+    text: str
+    shared: bool
+    created_at: str
+    updated_at: str

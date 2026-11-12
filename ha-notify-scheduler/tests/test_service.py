@@ -20,6 +20,8 @@ from db import make_engine, make_session_factory
 from models import Task
 from schemas import (
     ExecutionSpec,
+    MemoryCreate,
+    MemoryUpdate,
     ProgressEvent,
     ScheduleSpec,
     SettingsUpdate,
@@ -416,3 +418,17 @@ def test_tasks_belong_to_their_owner(tmp_path):
     assert svc.update_task(out.id, TaskUpdate(enabled=False), owner="bob") is None
     assert svc.delete_task(out.id) is None
     assert svc.delete_task(out.id, owner="alice") is not None
+
+
+def test_memories_are_personal_or_shared(tmp_path):
+    """A person sees the household's memories and their own, and can change only those."""
+    svc = make_service(tmp_path)
+    mine = svc.create_memory(MemoryCreate(text="likes 24°"), owner="alice")
+    home = svc.create_memory(MemoryCreate(text="大灯 is the ceiling light", shared=True))
+    assert [m.id for m in svc.list_memories(owner="alice")] == [mine.id, home.id]
+    assert [m.id for m in svc.list_memories(owner="bob")] == [home.id]
+    assert svc.delete_memory(mine.id, owner="bob") is None
+    edit = MemoryUpdate(text="大灯 = ceiling")
+    assert svc.update_memory(home.id, edit, owner="bob").text == "大灯 = ceiling"
+    with pytest.raises(ValueError):
+        svc.create_memory(MemoryCreate(text="no one"))

@@ -1,6 +1,6 @@
 """FastAPI surface for the scheduler service.
 
-The worker calls the ``/tasks`` CRUD, ``/notify``, ``/progress`` and ``/users`` endpoints over
+The worker calls the ``/tasks`` and ``/memories`` CRUD, ``/notify``, ``/progress`` and ``/users`` endpoints over
 the compose network, and the Home Assistant integration reads tasks and settings through the
 published port.
 """
@@ -17,6 +17,9 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from config import load_config
 from db import make_engine, make_session_factory
 from schemas import (
+    MemoryCreate,
+    MemoryOut,
+    MemoryUpdate,
     NotifyRequest,
     ProgressEvent,
     SettingsOut,
@@ -110,6 +113,38 @@ def delete_task(task_id: str, who: Owner) -> TaskOut:
     out = service.delete_task(task_id, owner=who)
     if out is None:
         raise HTTPException(status_code=404, detail="task not found")
+    return out
+
+
+@app.get("/memories", response_model=list[MemoryOut], dependencies=guard)
+def list_memories(who: Owner) -> list[MemoryOut]:
+    """The household's memories and the person's own."""
+    return service.list_memories(owner=who)
+
+
+@app.post("/memories", response_model=MemoryOut, status_code=201, dependencies=guard)
+def create_memory(req: MemoryCreate, who: Owner) -> MemoryOut:
+    try:
+        return service.create_memory(req, owner=who)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.patch("/memories/{memory_id}", response_model=MemoryOut, dependencies=guard)
+def update_memory(memory_id: int, req: MemoryUpdate, who: Owner) -> MemoryOut:
+    try:
+        out = service.update_memory(memory_id, req, owner=who)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if out is None:
+        raise HTTPException(status_code=404, detail="memory not found")
+    return out
+
+
+@app.delete("/memories/{memory_id}", response_model=MemoryOut, dependencies=guard)
+def delete_memory(memory_id: int, who: Owner) -> MemoryOut:
+    if (out := service.delete_memory(memory_id, owner=who)) is None:
+        raise HTTPException(status_code=404, detail="memory not found")
     return out
 
 

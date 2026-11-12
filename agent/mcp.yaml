@@ -16,7 +16,6 @@
 #   allowed_tools    only these of the server's tools reach the LLM
 #   report_progress  tools that answer at once and report their result as a later update;
 #                    they run in the background, and only a force stop cancels them
-#   per_person       an adapter scoping the server to the person speaking (mem0)
 #   restricted       offered only to people whose Settings entry lists this id
 #   confirm          tools that run only once the person has spoken since the model first
 #                    called them, which answers by asking the model to get their yes
@@ -30,18 +29,6 @@ servers:
     url: ${WEB_SEARCH_URL:-https://search.parallel.ai/mcp}
     headers:
       Authorization: Bearer ${PARALLEL_API_KEY}
-
-  # Mem0: preferences remembered across conversations, each person's in their own scope.
-  - id: memory
-    url: https://mcp.mem0.ai/mcp
-    headers:
-      Authorization: Bearer ${MEM0_API_KEY}
-    requires: [MEM0_API_KEY]
-    # Mem0 routinely takes 3-4 s to list its tools, and a failed setup loses memory
-    timeout: 20
-    # bulk deletes and event bookkeeping stay out of the LLM's reach
-    allowed_tools: [add_memory, search_memories, get_memories, update_memory, delete_memory]
-    per_person: mem0
 
   # music-mcp-server: Apple Music on a Mac and its AirPlay speakers, with presets from
   # a Shortcuts folder.

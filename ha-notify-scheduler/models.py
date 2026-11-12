@@ -1,4 +1,4 @@
-"""Persistence models: a ``Task`` and its ``Run`` history.
+"""Persistence models: a ``Task`` and its ``Run`` history, settings, and memories.
 
 ``tasks`` is the source of truth for the list UI and for rehydrating the in-memory APScheduler
 on boot. Timestamps are stored as ISO-8601 strings rather than SQLite DATETIME: ``run_at`` is
@@ -53,6 +53,19 @@ class Settings(Base):
     notify_targets: Mapped[list] = mapped_column(JSON, default=list)
     # People: [{"id", "name", "ha_user_id", "notify_targets", "servers"}] (schemas.UserSettings).
     users: Mapped[list] = mapped_column(JSON, default=list)
+
+
+class Memory(Base):
+    """Something the agent remembers: one person's, or the household's when ``user`` is null."""
+
+    __tablename__ = "memories"
+
+    # small integers, so the agent's prompt can cite them cheaply
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(String(40))
+    updated_at: Mapped[str] = mapped_column(String(40))
 
 
 class Run(Base):

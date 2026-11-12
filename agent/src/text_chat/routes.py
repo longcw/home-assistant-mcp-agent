@@ -15,6 +15,7 @@ from livekit.agents.a2a import A2ASessionContext
 from agent import HomeAssistantAgent
 from config import UPDATE_PREFIX, settings
 from conversations import A2A_ENDPOINT, conversations
+from scheduler_client import scheduler
 from text_chat.chat import TextChat
 from utils import build_llm
 
@@ -174,7 +175,8 @@ def mount(server: AgentServer) -> None:
     )
     async def serve(ctx: A2ASessionContext) -> None:
         session = AgentSession(llm=build_llm(), max_tool_steps=settings.max_tool_steps)
-        agent = HomeAssistantAgent(user_id=conversations.owner(ctx.context_id))
+        user_id = conversations.owner(ctx.context_id)
+        agent = HomeAssistantAgent(user_id, await scheduler.memories(user_id))
         agent._suggest_replies_cb = conversations.suggested.setdefault(
             ctx.context_id, []
         ).extend

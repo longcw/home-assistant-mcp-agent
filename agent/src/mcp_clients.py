@@ -49,35 +49,24 @@ def _expand(value: str) -> str | None:
     return None if missing else expanded
 
 
-# Mem0 scope arguments; a person's memory toolset sets them, so the LLM never does
-_MEMORY_SCOPE = ("user_id", "agent_id", "app_id", "run_id")
+class HomeAssistantTools(mcp.MCPToolset):
+    """HA's tools, with a script's `caller` field set to the id of the person speaking.
 
-
-class _Pinned(mcp.MCPToolset):
-    """A server whose tools get arguments about the person speaking from the agent."""
+    A script that reports back later, e.g. once hot water is ready, sends that id in an
+    `agent_update` event, which the scheduler forwards into the person's conversation.
+    """
 
     def __init__(self, *, user_id: str | None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._user_id = user_id
         self._pinned: Any = None
 
-    async def setup(self, *, reload: bool = False) -> _Pinned:
+    async def setup(self, *, reload: bool = False) -> HomeAssistantTools:
         await super().setup(reload=reload)
         # setup() is a no-op once connected; re-pin only a freshly fetched tool list
         if self._tools is not self._pinned:
             self._tools = self._pinned = [self._pin(t) for t in self._tools]
         return self
-
-    def _pin(self, tool: Any) -> Any:
-        raise NotImplementedError
-
-
-class HomeAssistantTools(_Pinned):
-    """HA's tools, with a script's `caller` field set to the id of the person speaking.
-
-    A script that reports back later, e.g. once hot water is ready, sends that id in an
-    `agent_update` event, which the scheduler forwards into the person's conversation.
-    """
 
     def _pin(self, tool: Any) -> Any:
         if not isinstance(tool, RawFunctionTool):
@@ -95,35 +84,6 @@ class HomeAssistantTools(_Pinned):
             args = {k: v for k, v in raw_arguments.items() if k != "caller"}
             if user_id:
                 args["caller"] = user_id
-            return await tool(args)
-
-        return function_tool(call, raw_schema=schema, flags=tool.info.flags)
-
-
-class PersonalMemory(_Pinned):
-    """Mem0's tools pinned to one person, so no one reaches another's memories."""
-
-    def _pin(self, tool: Any) -> Any:
-        if not isinstance(tool, RawFunctionTool):
-            return tool
-        schema = copy.deepcopy(tool.info.raw_schema)
-        params = schema["parameters"]
-        props = params.get("properties", {})
-        for key in _MEMORY_SCOPE:
-            props.pop(key, None)
-        if "required" in params:
-            params["required"] = [r for r in params["required"] if r in props]
-        name, user_id = tool.info.name, self._user_id
-
-        async def call(raw_arguments: dict[str, Any]) -> Any:
-            args = {k: v for k, v in raw_arguments.items() if k not in _MEMORY_SCOPE}
-            if name == "add_memory":
-                args["user_id"] = user_id
-            elif "filters" in props:
-                given = args.get("filters")
-                args["filters"] = {
-                    "AND": [{"user_id": user_id}, *([given] if given else [])]
-                }
             return await tool(args)
 
         return function_tool(call, raw_schema=schema, flags=tool.info.flags)
@@ -194,10 +154,6 @@ class Guarded(mcp.MCPToolset):
         )
 
 
-# per-person adapters an entry's ``per_person`` names
-_PER_PERSON = {"mem0": PersonalMemory}
-
-
 def _url(entry: dict[str, Any]) -> str | None:
     """The entry's endpoint; None when it is not configured, so it is skipped."""
     if any(not os.getenv(var) for var in entry.get("requires") or []):
@@ -236,17 +192,7 @@ def _toolset(entry: dict[str, Any], user_id: str | None) -> Toolset | None:
             for name in entry.get("report_progress") or []
         },
     }
-    adapter = entry.get("per_person")
-    if adapter and adapter not in _PER_PERSON:
-        raise ValueError(f"mcp server {server_id!r}: unknown per_person {adapter!r}")
     confirm = list(entry.get("confirm") or [])
-    if adapter and (restricted or confirm):
-        raise ValueError(
-            f"mcp server {server_id!r}: per_person cannot be restricted or confirmed"
-        )
-    # no one in particular gets the plain server, e.g. Mem0's default user scope
-    if adapter and user_id:
-        return _PER_PERSON[adapter](user_id=user_id, **kwargs)
     if restricted or confirm:
         return Guarded(
             user_id=user_id if restricted else None, confirm=confirm, **kwargs

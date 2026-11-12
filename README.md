@@ -89,10 +89,9 @@ Models default to Chinese-friendly choices and can be overridden via
 
 ## MCP servers
 
-Home Assistant's MCP server is always connected. Any others are listed in `agent/mcp.yaml`, with keys taken from `.env` as `${VAR}`, so the file holds no secrets. A server whose keys are unset is skipped, so the agent runs with Home Assistant's tools alone. The shipped file lists three servers:
+Home Assistant's MCP server is always connected. Any others are listed in `agent/mcp.yaml`, with keys taken from `.env` as `${VAR}`, so the file holds no secrets. A server whose keys are unset is skipped, so the agent runs with Home Assistant's tools alone. The shipped file lists, among others:
 
 - **Web search** ([Parallel Search](https://docs.parallel.ai/integrations/mcp/search-mcp)): `web_search` and `web_fetch`. The anonymous free tier works with no key.
-- **Memory** ([Mem0](https://docs.mem0.ai/platform/mem0-mcp)): preferences remembered across conversations, kept separate for each person. Needs `MEM0_API_KEY`.
 - **Coding agents** ([herdr-mcp-server](https://github.com/longcw/herdr-mcp-server)): start, check and prompt Claude Code sessions on a computer running herdr, so "用电脑…" or "on my computer…" requests and their follow-ups go to one session there. Needs `HERDR_MCP_URL`. It can run code there, so it is `restricted`: only people whose Settings entry lists `herdr` under `servers` get it.
 
 A server marked `callback: true` gets this agent's webhook in its `X-Callback-Url` and `X-Callback-Token` headers. When a task outlives its tool call, the server POSTs `{"source", "text"}` to `/chat/events`, and the agent tells the person in their text conversation, with tools off for that turn. This needs `CALLBACK_BASE_URL` and `TEXT_API_TOKEN`. The comments at the top of `mcp.yaml` describe every field. To add a server, add an entry there, or keep your own list in a copy that `AGENT_MCP_CONFIG` points at.
