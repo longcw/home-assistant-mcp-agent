@@ -12,7 +12,10 @@ import time
 from typing import Any, Literal
 
 from livekit.agents.a2a import A2AClient, TaskInput, TaskStream
+from livekit.agents.llm import ChatMessage
 
+import commands
+from commands import COMMAND_KEY, Command, exchanges
 from config import settings
 from conversations import conversations
 from history import render
@@ -234,6 +237,45 @@ class TextChat:
             return conversation_id, answer
         lines = ["(new conversation)", *lines] if started else lines
         return conversation_id, "\n".join([*lines, "", answer] if lines else [answer])
+
+    async def command(self, command: Command, typed: str) -> tuple[str, str]:
+        """Run a slash command beside the conversation, never interrupting its turn,
+        and add what was typed and the reply to it; returns (conversation id, reply)."""
+        async with self._lock:
+            client, conversation_id, _ = await self._open(renew=False)
+        # read before the load starts, so the store is not opened twice at once
+        items = await conversations.items(conversation_id)
+        # loaded while the command runs, since loading takes seconds of MCP connects
+        loading = asyncio.create_task(
+            asyncio.sleep(0)
+            if conversation_id in conversations.live
+            else client.prewarm(conversation_id=conversation_id)
+        )
+        mark = {COMMAND_KEY: command.name}
+        asked = ChatMessage(role="user", content=[typed], extra=mark)
+        conversations.record(conversation_id, typed)
+        self._progress.start(typed)
+        try:
+            reply = await commands.run(command, typed, exchanges(items, command.name))
+        except Exception as exc:  # noqa: BLE001 - a failed command still answers
+            logger.exception("command /%s failed", command.name)
+            loading.cancel()
+            reply = f"[error] {exc}"
+            self._progress.final(reply, ok=False, replies=[])
+            return conversation_id, reply
+        self._progress.final(reply, ok=True, replies=[])
+        answered = ChatMessage(role="assistant", content=[reply], extra=mark)
+        try:
+            await loading
+            for _ in range(100):
+                if conversation_id in conversations.live:
+                    break
+                await asyncio.sleep(0.1)
+            await conversations.add(conversation_id, [asked, answered])
+        except Exception:
+            # the person still gets the reply; only the conversation misses it
+            logger.exception("could not add /%s to %s", command.name, conversation_id)
+        return conversation_id, reply
 
     async def _read(self, turn: Turn, conversation_id: str) -> None:
         answer, ok = await turn.read(self._progress)

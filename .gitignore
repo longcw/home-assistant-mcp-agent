@@ -186,3 +186,4 @@ agent-data/
 
 # per-deployment overrides of agent/prompt.yaml and agent/mcp.yaml
 agent/*.local.yaml
+agent/commands/*.local.md

@@ -13,15 +13,16 @@ from livekit.plugins import openai
 from config import settings
 
 
-def build_llm() -> llm.LLM:
-    """The session LLM: LiveKit Inference, or the OpenAI-compatible endpoint if set."""
+def build_llm(extra_body: dict[str, Any] | None = None) -> llm.LLM:
+    """The session LLM: LiveKit Inference, or the OpenAI-compatible endpoint if set,
+    with ``extra_body`` in place of the configured one when given."""
     if not settings.llm_base_url:
         return inference.LLM(settings.llm_model)
     return openai.LLM(
         model=settings.llm_model,
         base_url=settings.llm_base_url,
         api_key=settings.llm_api_key,
-        extra_body=settings.llm_extra_body,
+        extra_body=settings.llm_extra_body if extra_body is None else extra_body,
     )
 
 
